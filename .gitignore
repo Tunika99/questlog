@@ -1,0 +1,14 @@
+# Veroeffentlicht wird NUR, was hier ausdruecklich freigegeben ist - alles andere
+# (calendar.json mit dem Schluessel, google-calendar.gs, state.json, serve.py, CLAUDE.md ...)
+# bleibt auf dem Mac. Neue Dateien sind damit automatisch privat.
+/*
+!/.gitignore
+!/.nojekyll
+!/index.html
+!/app.js
+!/sync.js
+!/styles.css
+!/og.jpg
+!/manifest.webmanifest
+!/icon-192.png
+!/icon-512.png

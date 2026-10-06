@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Questlog - how many hours this week actually moved you forward?</title>
+<meta name="description" content="A daily planner built around one honest number: the hours you spent on work that moves your goals forward. Plan focus blocks, track them, and see the truth at the end of the week." />
+<meta name="theme-color" content="#100e0b" />
+<meta name="color-scheme" content="dark" />
+<link rel="canonical" href="https://questlog.app/" />
+
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Questlog - hours that count" />
+<meta property="og:description" content="One number that matters: how many hours this week went to work that moves your goals forward." />
+<meta property="og:image" content="https://questlog.app/og.jpg" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="Questlog - 12.5 quest hours this week" />
+<meta property="og:url" content="https://questlog.app/" />
+<meta property="og:site_name" content="Questlog" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Questlog - hours that count" />
+<meta name="twitter:description" content="One number that matters: how many hours this week went to work that moves your goals forward." />
+<meta name="twitter:image" content="https://questlog.app/og.jpg" />
+
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e2b34e'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='21' font-weight='600' text-anchor='middle' fill='%2317120a'%3EQ%3C/text%3E%3C/svg%3E" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23100e0b'/%3E%3Crect x='4' y='4' width='24' height='24' rx='5' fill='%23e2b34e'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='17' font-weight='600' text-anchor='middle' fill='%2317120a'%3EQ%3C/text%3E%3C/svg%3E" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css?v=1791295759" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">Q</div>
+      <div class="brand-name">Questlog</div>
+    </div>
+
+    <nav id="nav" aria-label="Main">
+      <button class="nav-item" data-view="today"><span class="nav-key">1</span>Today</button>
+      <button class="nav-item" data-view="quests"><span class="nav-key">2</span>Quests</button>
+      <button class="nav-item" data-view="timeline"><span class="nav-key">3</span>Day log</button>
+    </nav>
+
+    <div class="side-section">
+      <div class="side-section-head">
+        <span>Habits</span>
+        <button id="habit-add-btn" class="icon-btn" title="New habit" aria-label="Add a habit">+</button>
+      </div>
+      <div id="habit-list"></div>
+      <form id="habit-form" class="hidden">
+        <input id="habit-name-input" type="text" placeholder="Habit name…" autocomplete="off" aria-label="New habit name" />
+        <select id="habit-quest-select" aria-label="Link habit to a quest"></select>
+      </form>
+    </div>
+
+    <nav id="nav-more" aria-label="More">
+      <button class="nav-item nav-minor" data-view="cookies"><span class="nav-key">4</span>Cookie jar</button>
+      <button class="nav-item nav-minor" data-view="priming"><span class="nav-key">5</span>Priming</button>
+    </nav>
+
+    <div class="side-foot">
+      <button id="sync-status" class="sync-status" hidden></button>
+      <div class="foot-row">
+        <button id="sound-toggle" title="Mute / unmute sounds"><span class="st-icon">♪</span><span class="st-label">Sound on</span></button>
+        <button id="backup-btn" title="Export or import a backup" aria-label="Backup: export or import">⤓</button>
+      </div>
+      <span class="only-keys"><span class="kbd">⌘K</span> palette · <span class="kbd">⌘Z</span> undo</span>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <div id="main">
+    <header id="topbar">
+      <button id="nav-toggle" aria-label="Open navigation" aria-expanded="false">☰</button>
+      <div class="top-date" id="top-date"></div>
+      <button id="instant-focus" title="Start focusing right now (⌥F)">
+        <span class="if-icon" aria-hidden="true">◉</span><span class="if-label">Instant focus</span>
+      </button>
+      <div id="live-chip" class="hidden" title="Focus timer running - click to open">
+        <span class="lc-dot"></span>
+        <span class="lc-title"></span>
+        <span class="lc-time">00:00</span>
+        <button class="lc-stop" title="Stop &amp; log" aria-label="Stop timer and log the time">■</button>
+      </div>
+      <div id="hero-metric">
+        <div class="hero-label">Quest hours</div>
+        <div class="hero-row">
+          <div id="streak-chip" class="hidden" title="Consecutive days carrying quest hours">
+            <svg class="flame" viewBox="0 0 16 20" width="13" height="16" aria-hidden="true">
+              <path d="M8 0C8 4 4 5 4 9a4 4 0 0 0 8 0c0-1.5-.8-2.6-1.6-3.6C9.6 4.3 8 3 8 0Z"/>
+              <path class="flame-core" d="M8 9c0 2-1.6 2.6-1.6 4.4A1.9 1.9 0 0 0 8 15.2a1.9 1.9 0 0 0 1.6-1.8C9.6 11.6 8 11 8 9Z"/>
+            </svg>
+            <span class="streak-n"></span>
+          </div>
+          <div class="hero-figs">
+            <div class="hero-fig" title="Time logged today on quest-linked tasks">
+              <div class="hero-num hero-num-day" id="hero-day-num">0.0<span class="hero-unit">h</span></div>
+              <div class="hero-sub">today</div>
+            </div>
+            <div class="hero-fig" title="Time logged this week on quest-linked tasks">
+              <div class="hero-num" id="hero-num">0.0<span class="hero-unit">h</span></div>
+              <div class="hero-sub">this week</div>
+            </div>
+          </div>
+          <svg id="hero-spark" width="120" height="34" viewBox="0 0 120 34"></svg>
+          <div class="hero-meta" id="hero-meta"></div>
+        </div>
+      </div>
+    </header>
+
+    <main id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<!-- ============ FOCUS MODE ============ -->
+<div id="focus-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Focus mode">
+  <div class="focus-stage">
+    <div class="focus-phase hidden" id="focus-phase"></div>
+    <button class="focus-quest" id="focus-quest" title="Link this session to a quest"></button>
+    <div class="focus-task" id="focus-task" title="Click to rename"></div>
+    <div class="focus-ring-wrap">
+      <svg id="focus-ring" viewBox="0 0 360 360">
+        <circle class="ring-track" cx="180" cy="180" r="172"></circle>
+        <circle class="ring-fill" id="ring-fill" cx="180" cy="180" r="172"></circle>
+      </svg>
+      <div class="focus-timer" id="focus-timer" role="timer" aria-live="off">00:00</div>
+    </div>
+    <div class="focus-block-list hidden" id="focus-block-list"></div>
+    <div class="focus-controls">
+      <button id="focus-pause" class="focus-btn">Pause</button>
+      <button id="focus-complete" class="focus-btn primary">Complete</button>
+    </div>
+    <div class="focus-mode-switch" id="focus-mode-switch">
+      <button data-mode="stopwatch" class="on">Stopwatch</button>
+      <button data-mode="pomodoro">Pomodoro 25′</button>
+    </div>
+    <div class="pomo-presets hidden" id="pomo-presets"></div>
+    <div class="focus-hints">
+      <span><span class="kbd">space</span> pause</span>
+      <span><span class="kbd">C</span> complete</span>
+      <span><span class="kbd">esc</span> leave</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============ COMMAND PALETTE ============ -->
+<div id="palette-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div id="palette">
+    <input id="palette-input" type="text" placeholder="Type a command or search tasks…" autocomplete="off" aria-label="Search commands and tasks" />
+    <div id="palette-list"></div>
+  </div>
+</div>
+
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<script src="sync.js?v=1791295759"></script>
+<script src="app.js?v=1791295759"></script>
+</body>
+</html>
