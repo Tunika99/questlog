@@ -14,6 +14,16 @@ const CLOUD_PRESYNC_KEY = "questlog_presync_backup";
 const CLOUD_PUBLIC_URL = "https://tunika99.github.io/questlog/";
 const CLOUD_URL_PREFIX = "https://script.google.com/macros/s/";
 const ON_MAC_SERVER = ["127.0.0.1", "localhost"].includes(location.hostname);
+// Public on purpose: a new device needs to know where to redeem a pairing code.
+// Every action except "claim" still needs a key, and claim only answers a fresh code.
+const CLOUD_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxqJnvmM46JB76Z6GfO87bldJ-6SjbAJHU45nzDaM1lEFTRQSFlYw4HBW3kAW9Jmwjn/exec";
+
+// On a shared computer everything lives in sessionStorage - gone when the browser closes.
+const CLOUD_SHARED_FLAG = "questlog_shared";
+const appStore = (() => {
+  try { return sessionStorage.getItem(CLOUD_SHARED_FLAG) === "1" ? sessionStorage : localStorage; }
+  catch (e) { return localStorage; }
+})();
 
 const CLOUD_PULL_EVERY = 60000;
 const CLOUD_PUSH_SOON = 2000;
@@ -25,6 +35,7 @@ const cloud = {
   cfg: null, version: 0, base: null,
   chain: Promise.resolve(), pushTimer: null, pushDue: 0,
   status: "off", error: "", lastOk: 0, pointerDown: false, lastKey: 0,
+  frozen: false,   // set on the way out of a (dis)connect - nothing may be written back then
 };
 
 /* ---------- three-way merge ---------- */
@@ -73,30 +84,34 @@ function mergeRecords(base, local, server) {
   return out;
 }
 
+// a shared computer's access ran out (6 h unused, or revoked) - not a fault, just reconnect
+const cloudExpired = () => !!cloud.cfg?.temporary && cloud.status === "error" && cloud.error === "forbidden";
+
 const cloudIsEmpty = (d) => !d || !["quests", "tasks", "sessions", "blocks", "habits", "beliefs"].some((k) => (d[k] || []).length);
 
 /* ---------- state on this device ---------- */
 
 function cloudLoadState() {
-  try { cloud.cfg = JSON.parse(localStorage.getItem(CLOUD_KEY) || "null"); } catch (e) { cloud.cfg = null; }
+  try { cloud.cfg = JSON.parse(appStore.getItem(CLOUD_KEY) || "null"); } catch (e) { cloud.cfg = null; }
   cloud.version = 0;
   cloud.base = null;
   if (!cloud.cfg) return;
   try {
-    const s = JSON.parse(localStorage.getItem(CLOUD_SYNC_KEY) || "null");
+    const s = JSON.parse(appStore.getItem(CLOUD_SYNC_KEY) || "null");
     // a remembered base belongs to the store it came from, and to no other
     if (s && s.url === cloud.cfg.url) { cloud.version = s.version; cloud.base = s.base; }
   } catch (e) { /* the next pull rebuilds it */ }
 }
 
 function cloudSaveState() {
+  if (cloud.frozen) return;
   try {
-    localStorage.setItem(CLOUD_SYNC_KEY, JSON.stringify({ url: cloud.cfg.url, version: cloud.version, base: cloud.base }));
+    appStore.setItem(CLOUD_SYNC_KEY, JSON.stringify({ url: cloud.cfg.url, version: cloud.version, base: cloud.base }));
   } catch (e) { /* storage full - next boot counts as first contact, which keeps everything */ }
 }
 
 function cloudConnect(cfg) {
-  localStorage.setItem(CLOUD_KEY, JSON.stringify(cfg));
+  appStore.setItem(CLOUD_KEY, JSON.stringify(cfg));
   cloudLoadState();
 }
 
@@ -175,7 +190,7 @@ async function cloudAdopt(version, data) {
   cloudSaveState();
   if (merged === db || cloudSame(merged, db)) return;
   if (firstContact) {
-    try { localStorage.setItem(CLOUD_PRESYNC_KEY, JSON.stringify(db)); } catch (e) { /* nice to have */ }
+    try { appStore.setItem(CLOUD_PRESYNC_KEY, JSON.stringify(db)); } catch (e) { /* nice to have */ }
   }
   cloudApply(merged);
 }
@@ -231,23 +246,25 @@ function cloudFailed(e) {
 function cloudRenderStatus() {
   const el = document.getElementById("sync-status");
   if (!el) return;
-  el.hidden = !cloud.cfg;
-  if (!cloud.cfg) return;
-  const label = { syncing: "Syncing…", ok: "Synced", offline: "Offline - changes wait here", error: "Sync problem" }[cloud.status] || "Sync";
+  if (!cloud.cfg) {
+    el.hidden = ON_MAC_SERVER;   // the Mac connects itself
+    el.className = "sync-status is-connect";
+    el.innerHTML = `<span class="sync-dot"></span>Connect this device`;
+    el.title = "Use the same Questlog as on your phone and Mac";
+    return;
+  }
+  el.hidden = false;
+  const label = cloudExpired() ? "Access expired - connect again"
+    : { syncing: "Syncing…", ok: "Synced", offline: "Offline - changes wait here", error: "Sync problem" }[cloud.status] || "Sync";
   el.className = `sync-status is-${cloud.status}`;
   el.innerHTML = `<span class="sync-dot"></span>${label}`;
   el.title = cloud.status === "error" ? cloud.error
-    : cloud.lastOk ? `Last synced ${new Date(cloud.lastOk).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - click to sync now`
-    : "";
+    : cloud.lastOk ? `Last synced ${cloudClock(cloud.lastOk)}` : "";
 }
+
+const cloudClock = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /* ---------- connecting a device ---------- */
-
-function cloudConnectLink() {
-  const b64 = btoa(JSON.stringify({ u: cloud.cfg.url, t: cloud.cfg.token }))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return `${CLOUD_PUBLIC_URL}#connect=${b64}`;
-}
 
 async function cloudReadConnectLink() {
   const m = location.hash.match(/^#connect=([A-Za-z0-9_-]+)$/);
@@ -282,14 +299,170 @@ async function cloudFetchMacConfig() {
 }
 
 function cloudPaletteItems() {
-  if (!cloud.cfg) return [];
-  return [
-    { icon: "⟳", label: "Sync now", run: () => cloudRun(cloudSyncNow) },
-    { icon: "⧉", label: "Copy link to connect another device", run: async () => {
-      await navigator.clipboard.writeText(cloudConnectLink());
-      toast("Link copied. It carries your sync key - send it only to yourself.", 5000);
-    } },
-  ];
+  if (!cloud.cfg) return ON_MAC_SERVER ? [] : [{ icon: "⧉", label: "Connect this device", run: cloudOpenConnectDialog }];
+  const items = [{ icon: "⟳", label: "Sync now", run: () => cloudRun(cloudSyncNow) }];
+  if (!cloud.cfg.temporary) items.push({ icon: "⧉", label: "Connect another device", run: cloudOpenPairDialog });
+  if (!ON_MAC_SERVER) items.push({ icon: "⊘", label: "Disconnect this device", run: cloudDisconnect });
+  return items;
+}
+
+/* ---------- the sync menu (tap the status) ---------- */
+
+function cloudOpenSyncMenu(anchor) {
+  closeQuestMenu();
+  const menu = document.createElement("div");
+  menu.className = "qmenu sync-menu";
+  menu.id = "qmenu";
+  const state = {
+    ok: `Synced${cloud.lastOk ? ` · ${cloudClock(cloud.lastOk)}` : ""}`,
+    syncing: "Syncing…",
+    offline: "Offline - changes wait on this device",
+    error: cloudExpired() ? "This computer's access has expired." : `Sync problem: ${esc(cloud.error)}`,
+  }[cloud.status] || "Sync";
+  menu.innerHTML =
+    `<div class="sync-head">${state}${cloud.cfg.temporary ? `<span class="sync-sub">Shared computer - forgotten when the browser closes</span>` : ""}</div>` +
+    (cloudExpired() ? `<button data-a="again">⧉ Connect again</button>` : `<button data-a="sync">⟳ Sync now</button>`) +
+    (cloud.cfg.temporary ? "" : `<button data-a="pair">⧉ Connect another device</button>`) +
+    (ON_MAC_SERVER ? "" : `<button data-a="leave">⊘ Disconnect this device</button>`);
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = clamp(r.left, 8, innerWidth - menu.offsetWidth - 8) + "px";
+  menu.style.top = clamp(r.top - menu.offsetHeight - 6, 8, innerHeight - menu.offsetHeight - 8) + "px";
+  const actions = {
+    sync: async () => { await cloudRun(cloudSyncNow); if (cloud.status === "error") toast(`Sync problem: ${esc(cloud.error)}`, 6000); },
+    pair: cloudOpenPairDialog,
+    leave: cloudDisconnect,
+    again: () => cloudOpenConnectDialog({ again: true }),
+  };
+  $$("button", menu).forEach((b) => b.addEventListener("click", () => { closeQuestMenu(); actions[b.dataset.a](); }));
+  setTimeout(() => document.addEventListener("pointerdown", qmenuDismiss, { once: true }), 0);
+}
+
+/* ---------- pairing: a short code instead of a long link ---------- */
+
+async function cloudOpenPairDialog() {
+  let out;
+  try { out = await cloudCall("pair"); }
+  catch (e) { toast(`Could not create a code: ${esc(String(e.message || e))}`, 6000); return; }
+  await confirmDialog({
+    title: "Connect another device",
+    confirmLabel: "Done",
+    cancelLabel: null,
+    body: `<div class="pair-code">${esc(out.code)}</div>
+      <p>On the other device, open <b>${esc(CLOUD_PUBLIC_URL.replace(/^https:\/\//, "").replace(/\/$/, ""))}</b>,
+         choose <b>Connect this device</b> at the bottom of the sidebar and enter this code.</p>
+      <p class="connect-note">It works once, until ${cloudClock(Date.now() + out.expiresIn * 1000)}.</p>`,
+  });
+}
+
+async function cloudClaim(code, shared) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), CLOUD_TIMEOUT);
+  try {
+    const q = new URLSearchParams({ action: "claim", code, shared: shared ? "1" : "0" });
+    const res = await fetch(`${CLOUD_SCRIPT_URL}?${q}`, { signal: ctl.signal });
+    const out = await res.json();
+    if (!out.ok) throw new Error(out.error || "no answer");
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// `again`: a shared computer whose access ran out - it stays shared, and what was done here is kept
+function cloudOpenConnectDialog({ again = false } = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = "confirm-overlay";
+  wrap.innerHTML = `
+    <div class="confirm-box connect-box" role="dialog" aria-modal="true" aria-label="Connect this device">
+      <div class="confirm-title">${again ? "Connect this computer again" : "Connect this device"}</div>
+      <div class="confirm-body">
+        <p>On your phone or Mac, tap the sync status at the bottom of the sidebar and choose
+           <b>Connect another device</b>. Enter the code it shows:</p>
+        <input class="connect-code" id="connect-code" maxlength="12" placeholder="XXXX-XXXX"
+               autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Pairing code"/>
+        <p class="connect-error" id="connect-error" hidden></p>
+        <p class="connect-note">${again
+          ? "Changes made here since the access expired are kept and go out right after."
+          : "On a <b>shared computer</b>, Questlog forgets everything when you close the browser, and this computer loses access after 6 hours without use."}</p>
+      </div>
+      <div class="confirm-row connect-row">
+        <button class="form-btn ghost" data-a="no">Cancel</button>
+        ${again ? `<button class="form-btn" data-a="shared">Connect</button>`
+          : `<button class="form-btn ghost" data-a="shared">Shared computer</button>
+             <button class="form-btn" data-a="own">My own device</button>`}
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const input = $("#connect-code", wrap), err = $("#connect-error", wrap);
+  const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey, true); };
+  // no default for Enter: on a shared computer, a reflexive Enter must not pick "my own device"
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  wrap.addEventListener("pointerdown", (e) => { if (e.target === wrap) close(); });
+
+  const submit = async (shared) => {
+    const code = input.value.trim();
+    if (!code) { err.textContent = "Enter the code first."; err.hidden = false; input.focus(); return; }
+    $$("button", wrap).forEach((b) => { b.disabled = true; });
+    err.hidden = true;
+    try {
+      const out = await cloudClaim(code, shared);
+      const cfg = { url: CLOUD_SCRIPT_URL, token: out.token };
+      if (out.temporary) cfg.temporary = true;
+      if (shared) {
+        // the empty app of this visit (and its undo history) must not stay behind on a shared machine
+        try {
+          if (cloudIsEmpty(JSON.parse(localStorage.getItem(STORE_KEY) || "null"))) {
+            localStorage.removeItem(STORE_KEY);
+            localStorage.removeItem(HISTORY_KEY);
+          }
+        } catch (e) { /* not ours to clear */ }
+        sessionStorage.setItem(CLOUD_SHARED_FLAG, "1");
+        sessionStorage.setItem(CLOUD_KEY, JSON.stringify(cfg));
+      } else {
+        localStorage.setItem(CLOUD_KEY, JSON.stringify(cfg));   // anything already here is merged in, not lost
+      }
+      cloud.frozen = true;
+      location.reload();
+    } catch (e) {
+      err.textContent = /wrong or expired/.test(e.message) ? "That code is wrong or has expired - create a new one."
+        : /too many/.test(e.message) ? "Too many wrong codes. Wait 10 minutes, then create a new one."
+        : `Could not connect: ${String(e.message || e)}`;
+      err.hidden = false;
+      $$("button", wrap).forEach((b) => { b.disabled = false; });
+      input.focus();
+    }
+  };
+  $('[data-a="no"]', wrap).addEventListener("click", close);
+  $('[data-a="shared"]', wrap).addEventListener("click", () => submit(true));
+  $('[data-a="own"]', wrap)?.addEventListener("click", () => submit(false));
+  input.focus();
+}
+
+async function cloudDisconnect() {
+  const ok = await confirmDialog({
+    title: "Disconnect this device?",
+    danger: true,
+    confirmLabel: "Disconnect",
+    body: `<p>Your Questlog stays on your other devices and in your Drive. This browser forgets it - every entry and the key.</p>`,
+  });
+  if (!ok) return;
+  await cloudRun(cloudPushNow);   // whatever happened here goes out first
+  if (cloud.status !== "ok") {
+    const anyway = await confirmDialog({
+      title: "Not everything has reached your other devices",
+      danger: true,
+      confirmLabel: "Disconnect anyway",
+      body: `<p>This device is offline or the sync failed. Disconnecting now loses the changes made here.</p>`,
+    });
+    if (!anyway) return;
+  }
+  if (cloud.cfg.temporary) await cloudCall("revoke").catch(() => {});   // this computer's access ends now, not in 6 hours
+  cloud.frozen = true;
+  clearTimeout(cloud.pushTimer);
+  for (const k of Object.keys(appStore)) if (k.startsWith("questlog")) appStore.removeItem(k);
+  location.reload();
 }
 
 // resolves after the first sync, so priming and review see this device's freshest state
@@ -301,10 +474,9 @@ async function cloudBoot() {
   cloudLoadState();
   await cloudReadConnectLink();
   if (!cloud.cfg && ON_MAC_SERVER) await cloudFetchMacConfig();
-  const statusEl = document.getElementById("sync-status");
-  statusEl?.addEventListener("click", async () => {
-    await cloudRun(cloudSyncNow);
-    if (cloud.status === "error") toast(`Sync problem: ${esc(cloud.error)}`, 6000);
+  document.getElementById("sync-status")?.addEventListener("click", (e) => {
+    if (cloud.cfg) cloudOpenSyncMenu(e.currentTarget);
+    else cloudOpenConnectDialog();
   });
   cloudRenderStatus();
   if (!cloud.cfg) return;

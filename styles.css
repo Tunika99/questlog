@@ -232,6 +232,52 @@ input::placeholder { color: var(--faint); }
 .sync-status.is-error { color: var(--red); }
 .sync-status.is-error .sync-dot { background: var(--red); }
 @keyframes syncPulse { 50% { opacity: 0.35; } }
+.sync-status.is-connect { color: var(--gold); }
+.sync-status.is-connect .sync-dot { background: transparent; box-shadow: inset 0 0 0 1px var(--gold); }
+.sync-status.is-connect:hover { color: var(--gold-bright); }
+
+.sync-head {
+  padding: 7px 9px 8px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--muted);
+  max-width: 240px;
+  line-height: 1.45;
+}
+.sync-sub { display: block; font-size: 10.5px; color: var(--faint); }
+
+/* pairing: the code is read off one screen and typed into another - make it unmistakable */
+.pair-code {
+  margin: 4px 0 14px;
+  padding: 14px 10px;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--gold-bright);
+  background: var(--gold-dim);
+  border: 1px solid rgba(226, 179, 78, 0.35);
+  border-radius: 10px;
+  user-select: all;
+}
+.connect-code {
+  display: block;
+  width: 100%;
+  margin: 12px 0 4px;
+  padding: 11px 12px;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 22px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.connect-code::placeholder { letter-spacing: 0.14em; }
+.connect-error { margin-top: 8px; font-size: 12.5px; color: var(--red); }
+.connect-note { margin-top: 10px; font-size: 11.5px; line-height: 1.5; color: var(--faint); }
+.connect-row { flex-wrap: wrap; }
+.connect-row .form-btn:disabled { opacity: 0.5; cursor: progress; }
 @media (prefers-reduced-motion: reduce) { .sync-status.is-syncing .sync-dot { animation: none; } }
 #backup-btn {
   width: 32px;

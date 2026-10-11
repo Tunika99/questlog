@@ -121,7 +121,7 @@ let lastSnapshot = null;
 /* history survives reloads: restored on load, flushed when the page goes away */
 function loadHistory() {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    const raw = appStore.getItem(HISTORY_KEY);
     if (!raw) return;
     const h = JSON.parse(raw);
     if (Array.isArray(h.past)) history.past = h.past.slice(-history.limit);
@@ -130,8 +130,9 @@ function loadHistory() {
 }
 
 function persistHistory() {
+  if (cloud.frozen) return;   // leaving after a (dis)connect: nothing goes back into this browser
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify({
+    appStore.setItem(HISTORY_KEY, JSON.stringify({
       past: history.past.slice(-40),
       future: history.future.slice(-40),
     }));
@@ -142,8 +143,9 @@ let storageWarned = false;
 
 /* private mode and full disks must not take the app down with them */
 function writeStore(json, quiet = false) {
+  if (cloud.frozen) return;
   try {
-    localStorage.setItem(STORE_KEY, json);
+    appStore.setItem(STORE_KEY, json);
   } catch (e) {
     if (!storageWarned) {
       storageWarned = true;
@@ -235,7 +237,7 @@ function redoLast() {
 
 function load() {
   try {
-    const raw = localStorage.getItem(STORE_KEY);
+    const raw = appStore.getItem(STORE_KEY);
     if (raw) {
       db = JSON.parse(raw);
       if (db && db.seedVersion === 4) {
@@ -5096,7 +5098,7 @@ function setupFocusControls() {
    BACKUP - your months of logged hours, in one file
    ============================================================ */
 
-function confirmDialog({ title, body, confirmLabel = "Confirm", danger = false }) {
+function confirmDialog({ title, body, confirmLabel = "Confirm", cancelLabel = "Cancel", danger = false }) {
   return new Promise((resolve) => {
     const wrap = document.createElement("div");
     wrap.className = "confirm-overlay";
@@ -5105,7 +5107,7 @@ function confirmDialog({ title, body, confirmLabel = "Confirm", danger = false }
         <div class="confirm-title">${esc(title)}</div>
         <div class="confirm-body">${body}</div>
         <div class="confirm-row">
-          <button class="form-btn ghost" data-a="no">Cancel</button>
+          ${cancelLabel ? `<button class="form-btn ghost" data-a="no">${esc(cancelLabel)}</button>` : ""}
           <button class="form-btn ${danger ? "danger-solid" : ""}" data-a="yes">${esc(confirmLabel)}</button>
         </div>
       </div>`;
