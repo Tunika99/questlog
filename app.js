@@ -156,6 +156,17 @@ function writeStore(json, quiet = false) {
   cloudSchedule(quiet);
 }
 
+// the slice of planned blocks Google Calendar mirrors: today and the next 60 days
+function calendarPayload() {
+  const from = startOfDay(Date.now()), to = from + 60 * DAY;
+  return {
+    from, to,
+    blocks: (db.blocks || [])
+      .filter((b) => b.end > from && b.start < to)
+      .map((b) => ({ id: b.id, start: b.start, end: b.end, title: calendarTitle(b) })),
+  };
+}
+
 function calendarTitle(b) {
   const titles = (b.taskIds || []).map(taskById).filter(Boolean).map((t) => t.title);
   return titles.length ? `Focus: ${titles.join(", ")}` : "Focus block";
@@ -176,8 +187,7 @@ function syncStateToServer() {
     if (!db.quests.length && !db.tasks.length && !(db.blocks || []).length && !(db.beliefs || []).length) return;
     const today = ymd(Date.now());
     const ds = startOfDay(Date.now());
-    // Google Calendar gleicht genau dieses Fenster ab - fruehere Tage bleiben unberuehrt
-    const calFrom = ds, calTo = ds + 60 * DAY;
+    const cal = calendarPayload();
     fetch("/api/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Questlog": "1" },
@@ -188,11 +198,9 @@ function syncStateToServer() {
         primedToday: primedToday(),
         beliefToday: todaysBelief()?.text || null,
         beliefs: (db.beliefs || []).map((b) => b.text),
-        calendarFrom: calFrom,
-        calendarTo: calTo,
-        calendarBlocks: (db.blocks || [])
-          .filter((b) => b.end > calFrom && b.start < calTo)
-          .map((b) => ({ id: b.id, start: b.start, end: b.end, title: calendarTitle(b) })),
+        calendarFrom: cal.from,
+        calendarTo: cal.to,
+        calendarBlocks: cal.blocks,
       }),
     }).catch(() => {});
   }, 800);

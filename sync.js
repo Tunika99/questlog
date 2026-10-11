@@ -25,11 +25,12 @@ const appStore = (() => {
   catch (e) { return localStorage; }
 })();
 
-const CLOUD_PULL_EVERY = 60000;
+const CLOUD_PULL_EVERY = 15000;   // cheap: an unchanged store answers with its version number only
 const CLOUD_PUSH_SOON = 2000;
 const CLOUD_PUSH_QUIET = 60000;   // focus checkpoints need not cross the network every 15 s
 const CLOUD_TIMEOUT = 30000;
 const CLOUD_TYPING_MS = 10000;
+const CLOUD_CAL_RESYNC = 30 * 60000;   // re-mirror the calendar even without changes - heals edits made in Google
 
 const cloud = {
   cfg: null, version: 0, base: null,
@@ -118,21 +119,30 @@ function cloudConnect(cfg) {
 
 /* ---------- talking to the Apps Script ---------- */
 
-async function cloudCall(action, params = {}, body) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), CLOUD_TIMEOUT);
-  try {
-    const q = new URLSearchParams({ action, token: cloud.cfg.token, ...params });
-    // a plain string body keeps this a "simple" request - Apps Script cannot answer a CORS preflight
-    const res = await fetch(`${cloud.cfg.url}?${q}`, body === undefined
-      ? { signal: ctl.signal }
-      : { method: "POST", body: JSON.stringify(body), signal: ctl.signal });
-    const out = await res.json();
-    if (!out.ok) throw new Error(out.error || "no answer");
-    return out;
-  } finally {
-    clearTimeout(timer);
+// "busy" means the script was holding its lock for another device - a moment later it is free
+async function cloudFetch(url, body) {
+  for (let attempt = 0; ; attempt++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), CLOUD_TIMEOUT);
+    let out;
+    try {
+      // a plain string body keeps this a "simple" request - Apps Script cannot answer a CORS preflight
+      const res = await fetch(url, body === undefined
+        ? { signal: ctl.signal }
+        : { method: "POST", body: JSON.stringify(body), signal: ctl.signal });
+      out = await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+    if (out.ok) return out;
+    if (out.error === "busy" && attempt < 3) { await new Promise((r) => setTimeout(r, 1500 * (attempt + 1))); continue; }
+    throw new Error(out.error || "no answer");
   }
+}
+
+function cloudCall(action, params = {}, body) {
+  const q = new URLSearchParams({ action, token: cloud.cfg.token, ...params });
+  return cloudFetch(`${cloud.cfg.url}?${q}`, body);
 }
 
 // one sync step at a time - two overlapping ones would merge against a stale base
@@ -148,12 +158,35 @@ async function cloudSyncNow() {
   if (!out.same) await cloudAdopt(out.version, out.data);
   await cloudPush();
   cloudSetStatus("ok");
+  cloudMirrorCalendar();
 }
 
 async function cloudPushNow() {
   if (!cloud.cfg) return;
   await cloudPush();
   cloudSetStatus("ok");
+  cloudMirrorCalendar();
+}
+
+// Focus blocks into Google Calendar. On the Mac, serve.py does this; everywhere else the page
+// itself - only right after a sync, when this device's blocks match everyone else's, and only
+// when they changed. Runs beside the data sync, never in its way.
+let cloudCalSig = null, cloudCalAt = 0, cloudCalRunning = false;
+async function cloudMirrorCalendar() {
+  if (ON_MAC_SERVER || !cloud.cfg || cloudCalRunning) return;
+  const payload = calendarPayload();
+  const sig = JSON.stringify(payload);
+  if (sig === cloudCalSig && Date.now() - cloudCalAt < CLOUD_CAL_RESYNC) return;
+  cloudCalRunning = true;
+  try {
+    await cloudCall("sync", {}, payload);
+    cloudCalSig = sig;
+    cloudCalAt = Date.now();
+  } catch (e) {
+    /* the calendar is only a mirror - the next sync tries again */
+  } finally {
+    cloudCalRunning = false;
+  }
 }
 
 async function cloudPush(depth = 0) {
@@ -356,20 +389,9 @@ async function cloudDeriveKey(email, password) {
   return btoa(String.fromCharCode(...new Uint8Array(bits)));
 }
 
-async function cloudLogin(email, key, shared) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), CLOUD_TIMEOUT);
-  try {
-    // POST, so neither the key nor the email ends up in an address or a log
-    const res = await fetch(`${CLOUD_SCRIPT_URL}?action=login`, {
-      method: "POST", body: JSON.stringify({ email, key, shared }), signal: ctl.signal,
-    });
-    const out = await res.json();
-    if (!out.ok) throw new Error(out.error || "no answer");
-    return out;
-  } finally {
-    clearTimeout(timer);
-  }
+// POST, so neither the key nor the email ends up in an address or a log
+function cloudLogin(email, key, shared) {
+  return cloudFetch(`${CLOUD_SCRIPT_URL}?action=login`, { email, key, shared });
 }
 
 const cloudLoginError = (msg) =>
