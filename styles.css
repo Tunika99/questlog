@@ -544,6 +544,13 @@ h2.view-title {
 .task-row.no-quest .task-title { color: var(--muted); }
 .task-row.selected { border-color: rgba(226, 179, 78, 0.35); box-shadow: 0 0 0 1px rgba(226, 179, 78, 0.25); }
 .task-row.dragging-ghost { opacity: 0.25; }
+/* a long press starts a drag on touch screens - it must not select text or open a menu instead */
+.task-row, .tray-item, .tl-grid {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
 .task-row.drag-float {
   position: fixed; z-index: 100;
   pointer-events: none;

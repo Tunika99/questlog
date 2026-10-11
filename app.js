@@ -1581,7 +1581,8 @@ function openDayMoveMenu(anchor, date, tasks) {
 
 /* drag a task onto another day - or up into today */
 function setupAgendaDrag(container) {
-  let drag = null;
+  let drag = null;   // { row, float, dx, dy, px, py, timer }
+
   const clearTargets = () =>
     $$(".agenda-day.drop-target, #open-list.drop-target").forEach((el) => el.classList.remove("drop-target"));
 
@@ -1591,19 +1592,9 @@ function setupAgendaDrag(container) {
     return el.closest(".agenda-day") || el.closest("#open-list");
   };
 
-  container.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest("button, input, select")) return;
-    const row = e.target.closest(".task-row");
-    if (!row) return;
-    drag = { row, x: e.clientX, y: e.clientY, started: false, float: null, dx: 0, dy: 0 };
-    try { container.setPointerCapture(e.pointerId); } catch (err) { /* not all pointers can be captured */ }
-    e.preventDefault();
-  });
-
-  // follow the cursor, highlight what's under it
+  // follow the pointer, highlight what's under it
   const paint = () => {
-    if (!drag || !drag.started) return;
+    if (!drag) return;
     drag.float.style.left = drag.px - drag.dx + "px";
     drag.float.style.top = drag.py - drag.dy + "px";
     clearTargets();
@@ -1614,7 +1605,7 @@ function setupAgendaDrag(container) {
   // days below the fold must stay reachable: scroll while held near an edge
   const EDGE = 80, SPEED = 13;
   const autoScroll = () => {
-    if (!drag || !drag.started) return;
+    if (!drag) return;
     const view = $("#view");
     if (!view) return;
     const r = view.getBoundingClientRect();
@@ -1624,46 +1615,38 @@ function setupAgendaDrag(container) {
     if (d) { view.scrollTop += d; paint(); }
   };
 
-  container.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    drag.px = e.clientX;
-    drag.py = e.clientY;
-    if (!drag.started) {
-      if (Math.abs(e.clientY - drag.y) < 5 && Math.abs(e.clientX - drag.x) < 5) return;
-      drag.started = true;
-      const r = drag.row.getBoundingClientRect();
-      drag.dx = drag.x - r.left;
-      drag.dy = drag.y - r.top;
-      const float = drag.row.cloneNode(true);
+  const end = () => {
+    clearInterval(drag.timer);
+    clearTargets();
+    drag.float.remove();
+    drag.row.classList.remove("dragging-ghost");
+    drag = null;
+  };
+
+  dragGesture(container, {
+    pick: (e) => !e.target.closest("button, input, select") && e.target.closest(".task-row"),
+    start: (row, x, y) => {
+      const r = row.getBoundingClientRect();
+      const float = row.cloneNode(true);
       float.classList.add("drag-float");
       float.style.width = r.width + "px";
       document.body.appendChild(float);
-      drag.float = float;
-      drag.row.classList.add("dragging-ghost");
-      drag.timer = setInterval(autoScroll, 16);
-    }
-    paint();
+      row.classList.add("dragging-ghost");
+      drag = { row, float, dx: x - r.left, dy: y - r.top, px: x, py: y, timer: setInterval(autoScroll, 16) };
+      paint();
+    },
+    move: (row, x, y) => { drag.px = x; drag.py = y; paint(); },
+    drop: (row, x, y) => {
+      end();
+      const hit = targetAt(x, y);
+      const t = taskById(row.dataset.id);
+      if (!hit || !t) { renderToday(); return; }
+      const date = hit.id === "open-list" ? ymd(Date.now()) : hit.dataset.date;
+      if (date === t.date) { renderToday(); return; }
+      moveTasksTo([t], date);
+    },
+    abort: () => { end(); renderToday(); },
   });
-
-  const finish = (e) => {
-    if (!drag) return;
-    const d = drag;
-    drag = null;
-    if (d.timer) clearInterval(d.timer);
-    clearTargets();
-    if (!d.started) return;
-    d.float.remove();
-    d.row.classList.remove("dragging-ghost");
-    const hit = targetAt(e.clientX, e.clientY);
-    const t = taskById(d.row.dataset.id);
-    if (!hit || !t) { renderToday(); return; }
-    const date = hit.id === "open-list" ? ymd(Date.now()) : hit.dataset.date;
-    if (date === t.date) { renderToday(); return; }
-    moveTasksTo([t], date);
-  };
-
-  container.addEventListener("pointerup", finish);
-  container.addEventListener("pointercancel", finish);
 }
 
 function taskRow(t) {
@@ -1869,56 +1852,91 @@ function closeQuestMenu() { const m = $("#qmenu"); if (m) m.remove(); }
 
 /* ---------- drag to reorder (pointer-based) ---------- */
 
-function setupReorder(list) {
-  let down = null;
+/* One rule for every drag in the app. Mouse: a drag starts once the pointer has moved a
+   few pixels. Touch: only after a still long-press - a swipe must stay a scroll, a tap a
+   tap. If the browser takes the gesture over (pointercancel), the drag is undone and never
+   committed: scrolling a list must not move a task. Listeners live on `el`, so they go
+   when a render replaces it. */
+const DRAG_LONG_PRESS = 380, DRAG_TOUCH_SLOP = 8, DRAG_MOUSE_SLOP = 5;
 
-  list.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest("button, input")) return;
-    const row = e.target.closest(".task-row");
-    if (!row) return;
-    down = { row, x: e.clientX, y: e.clientY, started: false, float: null, offsetY: 0 };
-    e.preventDefault();
+function dragGesture(el, { pick, start, move, drop, abort, tap }) {
+  let g = null;   // { id, x, y, touch, active, timer, data }
+  const reset = () => { if (g) clearTimeout(g.timer); g = null; };
+  const activate = () => {
+    g.active = true;
+    clearTimeout(g.timer);
+    try { el.setPointerCapture(g.id); } catch (err) { /* not all pointers can be captured */ }
+    if (g.touch) navigator.vibrate?.(8);
+    start(g.data, g.x, g.y);
+  };
+  // while a touch drag runs, the page must not scroll underneath it
+  el.addEventListener("touchmove", (e) => { if (g?.active) e.preventDefault(); }, { passive: false });
+  el.addEventListener("contextmenu", (e) => { if (g) e.preventDefault(); });
+
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || g) return;
+    const data = pick(e);
+    if (!data) return;
+    const touch = e.pointerType !== "mouse";
+    g = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, active: false, data };
+    if (touch) g.timer = setTimeout(() => { if (g && !g.active) activate(); }, DRAG_LONG_PRESS);
+    else e.preventDefault();   // no text selection while dragging with a mouse
   });
+  el.addEventListener("pointermove", (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    if (!g.active) {
+      const d = Math.hypot(e.clientX - g.x, e.clientY - g.y);
+      if (g.touch) { if (d > DRAG_TOUCH_SLOP) reset(); return; }   // a swipe: the browser scrolls
+      if (d < DRAG_MOUSE_SLOP) return;
+      activate();
+    }
+    move(g.data, e.clientX, e.clientY);
+  });
+  el.addEventListener("pointerup", (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    const s = g;
+    reset();
+    if (s.active) drop(s.data, e.clientX, e.clientY);
+    else tap?.(s.data);
+  });
+  el.addEventListener("pointercancel", (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    const s = g;
+    reset();
+    if (s.active) abort(s.data);
+  });
+}
 
-  window.addEventListener("pointermove", (e) => {
-    if (!down) return;
-    if (!down.started) {
-      if (Math.abs(e.clientY - down.y) < 5 && Math.abs(e.clientX - down.x) < 5) return;
-      down.started = true;
-      const r = down.row.getBoundingClientRect();
-      down.offsetY = down.y - r.top;
-      const float = down.row.cloneNode(true);
+function setupReorder(list) {
+  let st = null;   // { float, offsetY }
+  dragGesture(list, {
+    pick: (e) => !e.target.closest("button, input") && e.target.closest(".task-row"),
+    start: (row, x, y) => {
+      const r = row.getBoundingClientRect();
+      const float = row.cloneNode(true);
       float.classList.add("drag-float");
       float.style.width = r.width + "px";
       float.style.left = r.left + "px";
       float.style.top = r.top + "px";
       document.body.appendChild(float);
-      down.float = float;
-      down.row.classList.add("dragging-ghost");
-    }
-    down.float.style.top = e.clientY - down.offsetY + "px";
-    // find insertion point among siblings
-    const siblings = $$(".task-row", list).filter((r) => r !== down.row);
-    let before = null;
-    for (const sib of siblings) {
-      const r = sib.getBoundingClientRect();
-      if (e.clientY < r.top + r.height / 2) { before = sib; break; }
-    }
-    if (before) list.insertBefore(down.row, before);
-    else list.appendChild(down.row);
-  });
-
-  window.addEventListener("pointerup", () => {
-    if (!down) return;
-    if (down.started) {
-      down.float.remove();
-      down.row.classList.remove("dragging-ghost");
-      // commit new order
+      row.classList.add("dragging-ghost");
+      st = { float, offsetY: y - r.top };
+    },
+    move: (row, x, y) => {
+      st.float.style.top = y - st.offsetY + "px";
+      const before = $$(".task-row", list).filter((r) => r !== row)
+        .find((sib) => { const r = sib.getBoundingClientRect(); return y < r.top + r.height / 2; });
+      if (before) list.insertBefore(row, before);
+      else list.appendChild(row);
+    },
+    drop: (row) => {
+      st.float.remove();
+      st = null;
+      row.classList.remove("dragging-ghost");
       $$(".task-row", list).forEach((r, i) => { const t = taskById(r.dataset.id); if (t) t.order = i + 1; });
       save("Reorder tasks");
-    }
-    down = null;
+    },
+    abort: () => { st.float.remove(); st = null; renderToday(); },   // every row back where it was
   });
 }
 
@@ -3847,105 +3865,90 @@ function renderTray(tray, dateStr, grid) {
 
 /* drag a task out of the tray and drop it onto a time */
 function setupTrayDrag(tray, grid) {
-  let drag = null;
+  let drag = null;   // { item, float, dx, dy }
 
   const clearHints = () => {
     $$(".fb.drop-target").forEach((el) => el.classList.remove("drop-target"));
     $("#tray-ghost")?.remove();
   };
 
-  tray.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest("button, select, input")) return;
-    const item = e.target.closest(".tray-item");
-    if (!item) return;
-    drag = { item, x: e.clientX, y: e.clientY, started: false, float: null };
-    try { tray.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-    e.preventDefault();
-  });
+  const end = () => {
+    clearHints();
+    drag.float.remove();
+    drag.item.classList.remove("dragging-ghost");
+    drag = null;
+  };
 
-  tray.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    if (!drag.started) {
-      if (Math.abs(e.clientY - drag.y) < 5 && Math.abs(e.clientX - drag.x) < 5) return;
-      drag.started = true;
-      const r = drag.item.getBoundingClientRect();
-      drag.dx = drag.x - r.left;
-      drag.dy = drag.y - r.top;
-      const float = drag.item.cloneNode(true);
+  const insideGrid = (x, y) => {
+    const gr = grid.getBoundingClientRect();
+    return x >= gr.left && x <= gr.right && y >= gr.top && y <= gr.bottom;
+  };
+
+  dragGesture(tray, {
+    pick: (e) => !e.target.closest("button, select, input") && e.target.closest(".tray-item"),
+    start: (item, x, y) => {
+      const r = item.getBoundingClientRect();
+      const float = item.cloneNode(true);
       float.classList.add("tray-float");
       float.style.width = r.width + "px";
       document.body.appendChild(float);
-      drag.float = float;
-      drag.item.classList.add("dragging-ghost");
-    }
-    drag.float.style.left = e.clientX - drag.dx + "px";
-    drag.float.style.top = e.clientY - drag.dy + "px";
-
-    clearHints();
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const fb = el && el.closest(".fb");
-    if (fb) { fb.classList.add("drop-target"); return; }
-    // over empty timeline: preview the block that would be created
-    const gr = grid.getBoundingClientRect();
-    if (e.clientX >= gr.left && e.clientX <= gr.right && e.clientY >= gr.top && e.clientY <= gr.bottom) {
-      const start = snap15(tlTime(clamp(e.clientY - gr.top, 0, tlHeight)));
-      const ghost = document.createElement("div");
-      ghost.className = "fb ghost-plan";
-      ghost.id = "tray-ghost";
-      ghost.style.top = tlY(start) + "px";
-      ghost.style.height = PX_H + "px";
-      ghost.innerHTML = `<div class="fb-head"><span class="fb-label">New block</span>
-        <span class="fb-time">${fmtClock(start)}-${fmtClock(start + HOUR)}</span></div>`;
-      grid.appendChild(ghost);
-    }
-  });
-
-  const finish = (e) => {
-    if (!drag) return;
-    const d = drag;
-    drag = null;
-    clearHints();
-    if (!d.started) return;
-    d.float.remove();
-    d.item.classList.remove("dragging-ghost");
-
-    const t = taskById(d.item.dataset.id);
-    if (!t) { renderTimeline(); return; }
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const fb = el && el.closest(".fb");
-
-    if (fb) {
-      const b = db.blocks.find((x) => x.id === fb.dataset.bid);
-      if (b) {
-        b.taskIds = b.taskIds || [];
-        if (!b.taskIds.includes(t.id)) b.taskIds.push(t.id);
-        if (t.date !== b.date) t.date = b.date;   // pulled out of Someday
-        save(`Place “${t.title}”`);
-        renderTimeline();
-        const idx = blocksFor(b.date).findIndex((x) => x.id === b.id);
-        toast(`<span class="gold">${esc(t.title)}</span> → Focus ${ROMAN[idx]}`, 2600, undoLast);
+      item.classList.add("dragging-ghost");
+      drag = { item, float, dx: x - r.left, dy: y - r.top };
+    },
+    move: (item, x, y) => {
+      drag.float.style.left = x - drag.dx + "px";
+      drag.float.style.top = y - drag.dy + "px";
+      clearHints();
+      const el = document.elementFromPoint(x, y);
+      const fb = el && el.closest(".fb");
+      if (fb) { fb.classList.add("drop-target"); return; }
+      // over empty timeline: preview the block that would be created
+      if (insideGrid(x, y)) {
+        const start = snap15(tlTime(clamp(y - grid.getBoundingClientRect().top, 0, tlHeight)));
+        const ghost = document.createElement("div");
+        ghost.className = "fb ghost-plan";
+        ghost.id = "tray-ghost";
+        ghost.style.top = tlY(start) + "px";
+        ghost.style.height = PX_H + "px";
+        ghost.innerHTML = `<div class="fb-head"><span class="fb-label">New block</span>
+          <span class="fb-time">${fmtClock(start)}-${fmtClock(start + HOUR)}</span></div>`;
+        grid.appendChild(ghost);
       }
-      return;
-    }
+    },
+    drop: (item, x, y) => {
+      end();
+      const t = taskById(item.dataset.id);
+      if (!t) { renderTimeline(); return; }
+      const el = document.elementFromPoint(x, y);
+      const fb = el && el.closest(".fb");
 
-    const gr = grid.getBoundingClientRect();
-    const insideGrid = e.clientX >= gr.left && e.clientX <= gr.right && e.clientY >= gr.top && e.clientY <= gr.bottom;
-    if (!insideGrid) { renderTimeline(); return; }
+      if (fb) {
+        const b = db.blocks.find((bl) => bl.id === fb.dataset.bid);
+        if (b) {
+          b.taskIds = b.taskIds || [];
+          if (!b.taskIds.includes(t.id)) b.taskIds.push(t.id);
+          if (t.date !== b.date) t.date = b.date;   // pulled out of Someday
+          save(`Place “${t.title}”`);
+          renderTimeline();
+          const idx = blocksFor(b.date).findIndex((bl) => bl.id === b.id);
+          toast(`<span class="gold">${esc(t.title)}</span> → Focus ${ROMAN[idx]}`, 2600, undoLast);
+        }
+        return;
+      }
+      if (!insideGrid(x, y)) { renderTimeline(); return; }
 
-    // dropped on open time: a fresh one-hour block holding that task
-    const dayA = tlDay();
-    let start = snap15(tlTime(clamp(e.clientY - gr.top, 0, tlHeight)));
-    start = clamp(start, dayA + TL_START * HOUR, dayA + (TL_END - 1) * HOUR);
-    if (t.date !== ymd(dayA)) t.date = ymd(dayA);   // pulled out of Someday
-    db.blocks.push({ id: uid(), date: ymd(dayA), start, end: start + HOUR, taskIds: [t.id] });
-    save(`Plan “${t.title}” at ${fmtClock(start)}`);
-    renderTimeline();
-    toast(`<span class="gold">${esc(t.title)}</span> planned for ${fmtClock(start)}`, 3000, undoLast);
-  };
-
-  tray.addEventListener("pointerup", finish);
-  tray.addEventListener("pointercancel", finish);
+      // dropped on open time: a fresh one-hour block holding that task
+      const dayA = tlDay();
+      let start = snap15(tlTime(clamp(y - grid.getBoundingClientRect().top, 0, tlHeight)));
+      start = clamp(start, dayA + TL_START * HOUR, dayA + (TL_END - 1) * HOUR);
+      if (t.date !== ymd(dayA)) t.date = ymd(dayA);   // pulled out of Someday
+      db.blocks.push({ id: uid(), date: ymd(dayA), start, end: start + HOUR, taskIds: [t.id] });
+      save(`Plan “${t.title}” at ${fmtClock(start)}`);
+      renderTimeline();
+      toast(`<span class="gold">${esc(t.title)}</span> planned for ${fmtClock(start)}`, 3000, undoLast);
+    },
+    abort: () => { end(); renderTimeline(); },
+  });
 }
 
 /* ---------- focus blocks: the plan layer over the log ---------- */
@@ -4172,20 +4175,20 @@ function renderFbDetail() {
 function setupTimelineInteraction(grid) {
   let op = null; // { kind: 'create'|'move'|'resize-top'|'resize-bottom', ... }
 
-  const gridY = (e) => {
-    const r = grid.getBoundingClientRect();
-    return clamp(e.clientY - r.top, 0, tlHeight);
+  const gridY = (clientY) => clamp(clientY - grid.getBoundingClientRect().top, 0, tlHeight);
+
+  // what a press hits - read at pointerdown, acted on once the gesture is a drag or a tap
+  const pick = (e) => {
+    if (e.target.closest(".tl-form")) return null;
+    closeTlForm();
+    return {
+      handle: e.target.closest(".tl-handle"), block: e.target.closest(".tl-block"),
+      fbHandle: e.target.closest(".fb-handle"), fbNode: e.target.closest(".fb"), clientY: e.clientY,
+    };
   };
 
-  grid.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest(".tl-form")) return;
-    closeTlForm();
-    const handle = e.target.closest(".tl-handle");
-    const block = e.target.closest(".tl-block");
-    const fbHandle = e.target.closest(".fb-handle");
-    const fbNode = e.target.closest(".fb");
-    const y = gridY(e);
+  const begin = ({ handle, block, fbHandle, fbNode, clientY }) => {
+    const y = gridY(clientY);
 
     if (fbHandle && fbNode) {
       const b = db.blocks.find((x) => x.id === fbNode.dataset.bid);
@@ -4220,13 +4223,11 @@ function setupTimelineInteraction(grid) {
       grid.appendChild(ghost);
       op = { kind: "create", anchorY: y, el: ghost, moved: false };
     }
-    e.preventDefault();
-    try { grid.setPointerCapture(e.pointerId); } catch (err) { /* not all pointers can be captured */ }
-  });
+  };
 
-  grid.addEventListener("pointermove", (e) => {
+  const moveTo = (clientY) => {
     if (!op) return;
-    const y = gridY(e);
+    const y = gridY(clientY);
     op.moved = true;
 
     if (op.kind === "create") {
@@ -4282,9 +4283,9 @@ function setupTimelineInteraction(grid) {
       op.el.style.height = tlY(ne) - tlY(op.b.start) + "px";
       $(".fb-time", op.el).textContent = `${fmtClock(op.b.start)}-${fmtClock(ne)}`;
     }
-  });
+  };
 
-  grid.addEventListener("pointerup", () => {
+  const finish = () => {
     if (!op) return;
     const o = op; op = null;
     o.el.classList.remove("manipulating");
@@ -4329,6 +4330,22 @@ function setupTimelineInteraction(grid) {
     } else if (o.kind === "fb-resize-bottom" && o.moved && o.pendEnd != null) {
       o.b.end = o.pendEnd; save("Resize focus block"); renderAll();
     }
+  };
+
+  dragGesture(grid, {
+    pick,
+    start: (hit) => begin(hit),
+    move: (hit, x, y) => moveTo(y),
+    drop: () => finish(),
+    // the browser took the gesture over: nothing is planned, nothing moves
+    abort: () => {
+      if (!op) return;
+      const o = op;
+      op = null;
+      if (o.kind === "create") o.el.remove();
+      else renderTimeline();
+    },
+    tap: (hit) => { begin(hit); finish(); },
   });
 }
 
@@ -4733,6 +4750,42 @@ function enterWorkPhase(skipped = false) {
     : `Break over - <span class="gold">next ${Math.round(POMO_WORK / 60)} minutes</span>.`, 3600);
 }
 
+/* A phone freezes a web page in the background, so the chime cannot ring there. The end of
+   each pomodoro phase therefore also goes into Google Calendar as a reminder - the phone's
+   calendar app rings for it even with the browser closed. Touch screens only, and only when
+   the moment actually changes. */
+function pomoPhaseEnd() {
+  const f = ui.focus;
+  if (!f || f.mode !== "pomodoro") return null;
+  if (f.phase === "break") return f.phaseStart + POMO_BREAK * 1000;
+  if (!f.segStart) return null;   // paused
+  return Date.now() + Math.max(0, POMO_WORK - workPhaseElapsed()) * 1000;
+}
+
+let phoneTimerSent = null;   // what Google Calendar holds now - null: unknown, so tell it once
+let phoneTimerRetry = 0;
+let phoneTimerChain = Promise.resolve();
+function syncPhoneTimer() {
+  if (!cloud.cfg || !matchMedia("(hover: none) and (pointer: coarse)").matches) return;
+  if (Date.now() < phoneTimerRetry) return;
+  const end = pomoPhaseEnd();
+  const workDone = `Questlog: Pomodoro done - take ${Math.round(POMO_BREAK / 60)} min`;
+  const breakDone = "Questlog: Break over - back to focus";
+  // two phases ahead: the pomodoro runs on by itself, and a frozen page cannot plan the next one
+  const timers = !end ? [] : ui.focus.phase === "break"
+    ? [{ at: end, title: breakDone }, { at: end + POMO_WORK * 1000, title: workDone }]
+    : [{ at: end, title: workDone }, { at: end + POMO_BREAK * 1000, title: breakDone }];
+  const same = phoneTimerSent && phoneTimerSent.length === timers.length
+    && timers.every((t, i) => Math.abs(t.at - phoneTimerSent[i].at) < 5000);   // seconds of drift are no change
+  if (same) return;
+  phoneTimerSent = timers;
+  // in order: a pause right after a resume must not arrive first
+  phoneTimerChain = phoneTimerChain.then(() => cloudCall("timer", {}, { timers })).catch(() => {
+    phoneTimerSent = null;
+    phoneTimerRetry = Date.now() + 30000;   // offline: try again, but not every second
+  });
+}
+
 /* keeps the overlay's labels honest for the current phase */
 function syncFocusPhaseUI() {
   const f = ui.focus;
@@ -4862,6 +4915,7 @@ function ensureFocusTicker() {
 function stopFocusTicker() {
   clearInterval(ui.focusTicker);
   ui.focusTicker = null;
+  syncPhoneTimer();   // nothing counts down any more - the phone must not ring
 }
 
 /* stop from the background chip: log the segment, end the focus context */
@@ -4918,6 +4972,7 @@ function tickFocus() {
       enterBreakPhase();
     }
   }
+  syncPhoneTimer();
 
   if (overlayOpen) {
     const timerEl = $("#focus-timer");
@@ -5599,6 +5654,7 @@ function boot() {
   renderAll();
   // priming and review decide from the freshest state - another device may have done them already
   cloudBoot().finally(() => {
+    syncPhoneTimer();   // a reload ends any running pomodoro - clear a reminder left behind
     maybeShowPriming();
     setTimeout(maybeShowReview, 1200);
   });
