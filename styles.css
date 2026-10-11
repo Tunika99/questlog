@@ -1932,7 +1932,9 @@ h2.view-title {
     box-shadow: 0 0 60px rgba(0, 0, 0, 0.6);
   }
   body.nav-open #sidebar { transform: translateX(0); }
-  body.nav-open::after {
+  /* The dimmer belongs inside #app: #app is its own stacking context (z-index 1), so a
+     dimmer hung on body sat above the whole app - sidebar included - and swallowed every tap. */
+  body.nav-open #app::after {
     content: "";
     position: fixed; inset: 0;
     background: rgba(8, 7, 5, 0.55);

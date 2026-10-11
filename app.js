@@ -3452,6 +3452,9 @@ function renderTimeline() {
   const view = $("#view");
   const dayA = tlDay();
   const now = Date.now();
+  // a redraw of the same day keeps its place - only arriving on a day jumps to the morning
+  const keepScroll = ui.tlScrollDay === ymd(dayA) ? view.scrollTop : null;
+  ui.tlScrollDay = ymd(dayA);
   const isToday = dayA === startOfDay(now);
   const dateLabel = isToday ? "Today" : new Date(dayA).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
   // planning a later day? offer to bring today's leftovers along
@@ -3590,8 +3593,7 @@ function renderTimeline() {
   renderTray($("#tl-tray"), ymd(dayA), grid);
   renderCalColumn(dayA);
 
-  // scroll to morning
-  setTimeout(() => { $("#view").scrollTop = Math.max(0, tlY(dayA + 7.5 * HOUR)); }, 0);
+  setTimeout(() => { $("#view").scrollTop = keepScroll ?? Math.max(0, tlY(dayA + 7.5 * HOUR)); }, 0);
 }
 
 /* ---------- Google Calendar column: read-only, fetched per day via serve.py ---------- */
@@ -5475,6 +5477,7 @@ function setView(v) {
   ui.view = v;
   ui.questDetail = null;
   if (v === "timeline") ui.tlDate = null;
+  ui.tlScrollDay = null;   // coming back to the Day log starts at the morning again
   ui.animateList = true;
   closeQuestMenu();
   closeNav();
