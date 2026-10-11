@@ -247,37 +247,20 @@ input::placeholder { color: var(--faint); }
 }
 .sync-sub { display: block; font-size: 10.5px; color: var(--faint); }
 
-/* pairing: the code is read off one screen and typed into another - make it unmistakable */
-.pair-code {
-  margin: 4px 0 14px;
-  padding: 14px 10px;
-  text-align: center;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 30px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  color: var(--gold-bright);
-  background: var(--gold-dim);
-  border: 1px solid rgba(226, 179, 78, 0.35);
-  border-radius: 10px;
-  user-select: all;
-}
-.connect-code {
-  display: block;
-  width: 100%;
-  margin: 12px 0 4px;
-  padding: 11px 12px;
-  text-align: center;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 22px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-.connect-code::placeholder { letter-spacing: 0.14em; }
+/* logging in - one form for every device */
+.login-form { display: flex; flex-direction: column; gap: 12px; }
+.login-form p { margin: 0; }
+.login-field { display: flex; flex-direction: column; gap: 5px; }
+.login-field span { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted); }
+.login-field input { width: 100%; font-size: 15px; padding: 10px 12px; }
+.login-check { display: flex; gap: 9px; align-items: flex-start; font-size: 12px; line-height: 1.45; color: var(--muted); cursor: pointer; }
+.login-check input { margin-top: 2px; flex: none; accent-color: var(--gold); }
+.login-check b { color: var(--text); font-weight: 600; }
+.login-form .confirm-row { margin-top: 4px; }
+.login-form button:disabled, .login-form input:disabled { opacity: 0.55; cursor: progress; }
 .connect-error { margin-top: 8px; font-size: 12.5px; color: var(--red); }
 .connect-note { margin-top: 10px; font-size: 11.5px; line-height: 1.5; color: var(--faint); }
-.connect-row { flex-wrap: wrap; }
-.connect-row .form-btn:disabled { opacity: 0.5; cursor: progress; }
+
 @media (prefers-reduced-motion: reduce) { .sync-status.is-syncing .sync-dot { animation: none; } }
 #backup-btn {
   width: 32px;

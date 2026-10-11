@@ -14,8 +14,8 @@ const CLOUD_PRESYNC_KEY = "questlog_presync_backup";
 const CLOUD_PUBLIC_URL = "https://tunika99.github.io/questlog/";
 const CLOUD_URL_PREFIX = "https://script.google.com/macros/s/";
 const ON_MAC_SERVER = ["127.0.0.1", "localhost"].includes(location.hostname);
-// Public on purpose: a new device needs to know where to redeem a pairing code.
-// Every action except "claim" still needs a key, and claim only answers a fresh code.
+// Public on purpose: a new device needs to know where to log in. Every action except
+// "login" needs a key, and login only answers the right email and password.
 const CLOUD_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxqJnvmM46JB76Z6GfO87bldJ-6SjbAJHU45nzDaM1lEFTRQSFlYw4HBW3kAW9Jmwjn/exec";
 
 // On a shared computer everything lives in sessionStorage - gone when the browser closes.
@@ -84,8 +84,9 @@ function mergeRecords(base, local, server) {
   return out;
 }
 
-// a shared computer's access ran out (6 h unused, or revoked) - not a fault, just reconnect
-const cloudExpired = () => !!cloud.cfg?.temporary && cloud.status === "error" && cloud.error === "forbidden";
+// a login ended (6 h unused on a shared computer, or a new password) - not a fault, just log in again
+const cloudSignedOut = () => !!(cloud.cfg?.temporary || cloud.cfg?.device) && cloud.status === "error" && cloud.error === "forbidden";
+const cloudIsMaster = () => !!cloud.cfg && !cloud.cfg.temporary && !cloud.cfg.device;
 
 const cloudIsEmpty = (d) => !d || !["quests", "tasks", "sessions", "blocks", "habits", "beliefs"].some((k) => (d[k] || []).length);
 
@@ -249,12 +250,12 @@ function cloudRenderStatus() {
   if (!cloud.cfg) {
     el.hidden = ON_MAC_SERVER;   // the Mac connects itself
     el.className = "sync-status is-connect";
-    el.innerHTML = `<span class="sync-dot"></span>Connect this device`;
+    el.innerHTML = `<span class="sync-dot"></span>Log in`;
     el.title = "Use the same Questlog as on your phone and Mac";
     return;
   }
   el.hidden = false;
-  const label = cloudExpired() ? "Access expired - connect again"
+  const label = cloudSignedOut() ? "Signed out - log in again"
     : { syncing: "Syncing…", ok: "Synced", offline: "Offline - changes wait here", error: "Sync problem" }[cloud.status] || "Sync";
   el.className = `sync-status is-${cloud.status}`;
   el.innerHTML = `<span class="sync-dot"></span>${label}`;
@@ -299,10 +300,10 @@ async function cloudFetchMacConfig() {
 }
 
 function cloudPaletteItems() {
-  if (!cloud.cfg) return ON_MAC_SERVER ? [] : [{ icon: "⧉", label: "Connect this device", run: cloudOpenConnectDialog }];
+  if (!cloud.cfg) return ON_MAC_SERVER ? [] : [{ icon: "⧉", label: "Log in", run: () => cloudOpenLoginDialog() }];
   const items = [{ icon: "⟳", label: "Sync now", run: () => cloudRun(cloudSyncNow) }];
-  if (!cloud.cfg.temporary) items.push({ icon: "⧉", label: "Connect another device", run: cloudOpenPairDialog });
-  if (!ON_MAC_SERVER) items.push({ icon: "⊘", label: "Disconnect this device", run: cloudDisconnect });
+  if (cloudIsMaster()) items.push({ icon: "✉", label: "Set email & password for logging in", run: cloudOpenSetLoginDialog });
+  if (!ON_MAC_SERVER) items.push({ icon: "⊘", label: "Log out", run: cloudLogout });
   return items;
 }
 
@@ -313,54 +314,56 @@ function cloudOpenSyncMenu(anchor) {
   const menu = document.createElement("div");
   menu.className = "qmenu sync-menu";
   menu.id = "qmenu";
-  const state = {
+  const state = cloudSignedOut() ? "You have been logged out on this device." : {
     ok: `Synced${cloud.lastOk ? ` · ${cloudClock(cloud.lastOk)}` : ""}`,
     syncing: "Syncing…",
     offline: "Offline - changes wait on this device",
-    error: cloudExpired() ? "This computer's access has expired." : `Sync problem: ${esc(cloud.error)}`,
+    error: `Sync problem: ${esc(cloud.error)}`,
   }[cloud.status] || "Sync";
   menu.innerHTML =
     `<div class="sync-head">${state}${cloud.cfg.temporary ? `<span class="sync-sub">Shared computer - forgotten when the browser closes</span>` : ""}</div>` +
-    (cloudExpired() ? `<button data-a="again">⧉ Connect again</button>` : `<button data-a="sync">⟳ Sync now</button>`) +
-    (cloud.cfg.temporary ? "" : `<button data-a="pair">⧉ Connect another device</button>`) +
-    (ON_MAC_SERVER ? "" : `<button data-a="leave">⊘ Disconnect this device</button>`);
+    (cloudSignedOut() ? `<button data-a="again">⧉ Log in again</button>` : `<button data-a="sync">⟳ Sync now</button>`) +
+    (cloudIsMaster() ? `<button data-a="setlogin">✉ Set email &amp; password</button>` : "") +
+    (ON_MAC_SERVER ? "" : `<button data-a="leave">⊘ Log out</button>`);
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
   menu.style.left = clamp(r.left, 8, innerWidth - menu.offsetWidth - 8) + "px";
   menu.style.top = clamp(r.top - menu.offsetHeight - 6, 8, innerHeight - menu.offsetHeight - 8) + "px";
   const actions = {
     sync: async () => { await cloudRun(cloudSyncNow); if (cloud.status === "error") toast(`Sync problem: ${esc(cloud.error)}`, 6000); },
-    pair: cloudOpenPairDialog,
-    leave: cloudDisconnect,
-    again: () => cloudOpenConnectDialog({ again: true }),
+    setlogin: cloudOpenSetLoginDialog,
+    leave: cloudLogout,
+    again: () => cloudOpenLoginDialog({ again: true }),
   };
   $$("button", menu).forEach((b) => b.addEventListener("click", () => { closeQuestMenu(); actions[b.dataset.a](); }));
   setTimeout(() => document.addEventListener("pointerdown", qmenuDismiss, { once: true }), 0);
 }
 
-/* ---------- pairing: a short code instead of a long link ---------- */
+/* ---------- logging in with email and password ---------- */
 
-async function cloudOpenPairDialog() {
-  let out;
-  try { out = await cloudCall("pair"); }
-  catch (e) { toast(`Could not create a code: ${esc(String(e.message || e))}`, 6000); return; }
-  await confirmDialog({
-    title: "Connect another device",
-    confirmLabel: "Done",
-    cancelLabel: null,
-    body: `<div class="pair-code">${esc(out.code)}</div>
-      <p>On the other device, open <b>${esc(CLOUD_PUBLIC_URL.replace(/^https:\/\//, "").replace(/\/$/, ""))}</b>,
-         choose <b>Connect this device</b> at the bottom of the sidebar and enter this code.</p>
-      <p class="connect-note">It works once, until ${cloudClock(Date.now() + out.expiresIn * 1000)}.</p>`,
-  });
+// The password never leaves the device: what travels is a key derived from it, slowly,
+// so a stolen copy of the server's record cannot be turned back into the password.
+const CLOUD_KDF_ROUNDS = 600000;
+
+async function cloudDeriveKey(email, password) {
+  // browsers offer this only on https (or localhost) - never send a password over plain http anyway
+  if (!globalThis.crypto?.subtle) throw new Error("this page needs a secure connection - open it via https");
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: enc.encode(`questlog-login:${email}`), iterations: CLOUD_KDF_ROUNDS },
+    base, 256);
+  return btoa(String.fromCharCode(...new Uint8Array(bits)));
 }
 
-async function cloudClaim(code, shared) {
+async function cloudLogin(email, key, shared) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CLOUD_TIMEOUT);
   try {
-    const q = new URLSearchParams({ action: "claim", code, shared: shared ? "1" : "0" });
-    const res = await fetch(`${CLOUD_SCRIPT_URL}?${q}`, { signal: ctl.signal });
+    // POST, so neither the key nor the email ends up in an address or a log
+    const res = await fetch(`${CLOUD_SCRIPT_URL}?action=login`, {
+      method: "POST", body: JSON.stringify({ email, key, shared }), signal: ctl.signal,
+    });
     const out = await res.json();
     if (!out.ok) throw new Error(out.error || "no answer");
     return out;
@@ -369,47 +372,62 @@ async function cloudClaim(code, shared) {
   }
 }
 
-// `again`: a shared computer whose access ran out - it stays shared, and what was done here is kept
-function cloudOpenConnectDialog({ again = false } = {}) {
+const cloudLoginError = (msg) =>
+  /wrong email or password/.test(msg) ? "Wrong email or password."
+  : /too many/.test(msg) ? "Too many attempts. Try again in 15 minutes."
+  : /not set up/.test(msg) ? "Login isn't set up yet. On your Mac, tap the sync status at the bottom of the sidebar and choose Set email & password."
+  : `Could not log in: ${msg}`;
+
+// `again`: the login on this device ended - it keeps its mode, and what was done here is kept
+function cloudOpenLoginDialog({ again = false } = {}) {
+  if (document.querySelector(".login-box")) return;
+  // a phone is most likely his own; a desktop he logs into is most likely the uni PC
+  const touch = matchMedia("(hover: none) and (pointer: coarse)").matches;
   const wrap = document.createElement("div");
   wrap.className = "confirm-overlay";
   wrap.innerHTML = `
-    <div class="confirm-box connect-box" role="dialog" aria-modal="true" aria-label="Connect this device">
-      <div class="confirm-title">${again ? "Connect this computer again" : "Connect this device"}</div>
-      <div class="confirm-body">
-        <p>On your phone or Mac, tap the sync status at the bottom of the sidebar and choose
-           <b>Connect another device</b>. Enter the code it shows:</p>
-        <input class="connect-code" id="connect-code" maxlength="12" placeholder="XXXX-XXXX"
-               autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Pairing code"/>
-        <p class="connect-error" id="connect-error" hidden></p>
-        <p class="connect-note">${again
-          ? "Changes made here since the access expired are kept and go out right after."
-          : "On a <b>shared computer</b>, Questlog forgets everything when you close the browser, and this computer loses access after 6 hours without use."}</p>
-      </div>
-      <div class="confirm-row connect-row">
-        <button class="form-btn ghost" data-a="no">Cancel</button>
-        ${again ? `<button class="form-btn" data-a="shared">Connect</button>`
-          : `<button class="form-btn ghost" data-a="shared">Shared computer</button>
-             <button class="form-btn" data-a="own">My own device</button>`}
-      </div>
+    <div class="confirm-box login-box" role="dialog" aria-modal="true" aria-label="Log in">
+      <div class="confirm-title">${again ? "Log in again" : "Log in to Questlog"}</div>
+      <form class="login-form" novalidate>
+        <label class="login-field"><span>Email</span>
+          <input type="email" id="login-email" autocomplete="username" autocapitalize="off" spellcheck="false"/></label>
+        <label class="login-field"><span>Password</span>
+          <input type="password" id="login-pass" autocomplete="current-password"/></label>
+        ${again ? `<p class="connect-note">Changes made here in the meantime are kept and go out right after.</p>`
+          : `<label class="login-check"><input type="checkbox" id="login-shared" ${touch ? "" : "checked"}/>
+               <span><b>Shared computer</b> - forget everything when the browser closes, and end this login after 6 hours without use</span></label>`}
+        <p class="connect-error" id="login-error" hidden></p>
+        <div class="confirm-row">
+          <button type="button" class="form-btn ghost" data-a="no">${again ? "Cancel" : "Not now"}</button>
+          <button type="submit" class="form-btn" data-a="go">Log in</button>
+        </div>
+      </form>
     </div>`;
   document.body.appendChild(wrap);
-  const input = $("#connect-code", wrap), err = $("#connect-error", wrap);
+  const form = $("form", wrap), err = $("#login-error", wrap), go = $('[data-a="go"]', wrap);
   const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey, true); };
-  // no default for Enter: on a shared computer, a reflexive Enter must not pick "my own device"
   const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
   document.addEventListener("keydown", onKey, true);
-  wrap.addEventListener("pointerdown", (e) => { if (e.target === wrap) close(); });
+  $('[data-a="no"]', wrap).addEventListener("click", close);
+  const fail = (msg) => {
+    err.textContent = msg; err.hidden = false;
+    $$("button, input", wrap).forEach((x) => { x.disabled = false; });
+    go.textContent = "Log in";
+  };
 
-  const submit = async (shared) => {
-    const code = input.value.trim();
-    if (!code) { err.textContent = "Enter the code first."; err.hidden = false; input.focus(); return; }
-    $$("button", wrap).forEach((b) => { b.disabled = true; });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = $("#login-email", wrap).value.trim().toLowerCase(), pass = $("#login-pass", wrap).value;
+    if (!email || !pass) { fail("Enter your email and password."); return; }
+    $$("button, input", wrap).forEach((x) => { x.disabled = true; });
+    go.textContent = "Logging in…";
     err.hidden = true;
     try {
-      const out = await cloudClaim(code, shared);
+      const shared = again ? appStore === sessionStorage : $("#login-shared", wrap).checked;
+      const out = await cloudLogin(email, await cloudDeriveKey(email, pass), shared);
       const cfg = { url: CLOUD_SCRIPT_URL, token: out.token };
       if (out.temporary) cfg.temporary = true;
+      if (out.device) cfg.device = true;
       if (shared) {
         // the empty app of this visit (and its undo history) must not stay behind on a shared machine
         try {
@@ -417,7 +435,7 @@ function cloudOpenConnectDialog({ again = false } = {}) {
             localStorage.removeItem(STORE_KEY);
             localStorage.removeItem(HISTORY_KEY);
           }
-        } catch (e) { /* not ours to clear */ }
+        } catch (er) { /* not ours to clear */ }
         sessionStorage.setItem(CLOUD_SHARED_FLAG, "1");
         sessionStorage.setItem(CLOUD_KEY, JSON.stringify(cfg));
       } else {
@@ -425,40 +443,85 @@ function cloudOpenConnectDialog({ again = false } = {}) {
       }
       cloud.frozen = true;
       location.reload();
-    } catch (e) {
-      err.textContent = /wrong or expired/.test(e.message) ? "That code is wrong or has expired - create a new one."
-        : /too many/.test(e.message) ? "Too many wrong codes. Wait 10 minutes, then create a new one."
-        : `Could not connect: ${String(e.message || e)}`;
-      err.hidden = false;
-      $$("button", wrap).forEach((b) => { b.disabled = false; });
-      input.focus();
+    } catch (er) {
+      fail(cloudLoginError(String(er.message || er)));
     }
-  };
-  $('[data-a="no"]', wrap).addEventListener("click", close);
-  $('[data-a="shared"]', wrap).addEventListener("click", () => submit(true));
-  $('[data-a="own"]', wrap)?.addEventListener("click", () => submit(false));
-  input.focus();
+  });
+  $("#login-email", wrap).focus();
 }
 
-async function cloudDisconnect() {
+function cloudOpenSetLoginDialog() {
+  const wrap = document.createElement("div");
+  wrap.className = "confirm-overlay";
+  wrap.innerHTML = `
+    <div class="confirm-box login-box" role="dialog" aria-modal="true" aria-label="Set email and password">
+      <div class="confirm-title">Set email &amp; password</div>
+      <form class="login-form" novalidate>
+        <p>With these you log in to Questlog on any other device. Setting them again later logs out every device that used the old ones.</p>
+        <label class="login-field"><span>Email</span>
+          <input type="email" id="set-email" autocomplete="username" autocapitalize="off" spellcheck="false"/></label>
+        <label class="login-field"><span>New password</span>
+          <input type="password" id="set-pass" autocomplete="new-password"/></label>
+        <label class="login-field"><span>Repeat password</span>
+          <input type="password" id="set-pass2" autocomplete="new-password"/></label>
+        <p class="connect-error" id="set-error" hidden></p>
+        <div class="confirm-row">
+          <button type="button" class="form-btn ghost" data-a="no">Cancel</button>
+          <button type="submit" class="form-btn" data-a="go">Save</button>
+        </div>
+      </form>
+    </div>`;
+  document.body.appendChild(wrap);
+  const form = $("form", wrap), err = $("#set-error", wrap), go = $('[data-a="go"]', wrap);
+  const close = () => { wrap.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  document.addEventListener("keydown", onKey, true);
+  $('[data-a="no"]', wrap).addEventListener("click", close);
+  const fail = (msg) => {
+    err.textContent = msg; err.hidden = false;
+    $$("button, input", wrap).forEach((x) => { x.disabled = false; });
+    go.textContent = "Save";
+  };
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = $("#set-email", wrap).value.trim().toLowerCase();
+    const pass = $("#set-pass", wrap).value, pass2 = $("#set-pass2", wrap).value;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { fail("That does not look like an email address."); return; }
+    if (pass.length < 8) { fail("Use at least 8 characters for the password."); return; }
+    if (pass !== pass2) { fail("The two passwords differ."); return; }
+    $$("button, input", wrap).forEach((x) => { x.disabled = true; });
+    go.textContent = "Saving…";
+    err.hidden = true;
+    try {
+      await cloudCall("setLogin", {}, { email, key: await cloudDeriveKey(email, pass) });
+      close();
+      toast(`Login set. On any device: open Questlog and log in with <span class="gold">${esc(email)}</span>.`, 6000);
+    } catch (er) {
+      fail(`Could not save: ${String(er.message || er)}`);
+    }
+  });
+  $("#set-email", wrap).focus();
+}
+
+async function cloudLogout() {
   const ok = await confirmDialog({
-    title: "Disconnect this device?",
+    title: "Log out on this device?",
     danger: true,
-    confirmLabel: "Disconnect",
-    body: `<p>Your Questlog stays on your other devices and in your Drive. This browser forgets it - every entry and the key.</p>`,
+    confirmLabel: "Log out",
+    body: `<p>Your Questlog stays on your other devices and in your Drive. This browser forgets it - every entry and the login.</p>`,
   });
   if (!ok) return;
   await cloudRun(cloudPushNow);   // whatever happened here goes out first
-  if (cloud.status !== "ok") {
+  if (cloud.status !== "ok" && !cloudSignedOut()) {
     const anyway = await confirmDialog({
       title: "Not everything has reached your other devices",
       danger: true,
-      confirmLabel: "Disconnect anyway",
-      body: `<p>This device is offline or the sync failed. Disconnecting now loses the changes made here.</p>`,
+      confirmLabel: "Log out anyway",
+      body: `<p>This device is offline or the sync failed. Logging out now loses the changes made here.</p>`,
     });
     if (!anyway) return;
   }
-  if (cloud.cfg.temporary) await cloudCall("revoke").catch(() => {});   // this computer's access ends now, not in 6 hours
+  if (!cloudIsMaster()) await cloudCall("revoke").catch(() => {});   // this login ends now, everywhere
   cloud.frozen = true;
   clearTimeout(cloud.pushTimer);
   for (const k of Object.keys(appStore)) if (k.startsWith("questlog")) appStore.removeItem(k);
@@ -476,10 +539,13 @@ async function cloudBoot() {
   if (!cloud.cfg && ON_MAC_SERVER) await cloudFetchMacConfig();
   document.getElementById("sync-status")?.addEventListener("click", (e) => {
     if (cloud.cfg) cloudOpenSyncMenu(e.currentTarget);
-    else cloudOpenConnectDialog();
+    else cloudOpenLoginDialog();
   });
   cloudRenderStatus();
-  if (!cloud.cfg) return;
+  if (!cloud.cfg) {
+    if (!ON_MAC_SERVER) cloudOpenLoginDialog();   // on the public page, logging in is the first thing to do
+    return;
+  }
   setInterval(() => { if (document.visibilityState === "visible") cloudRun(cloudSyncNow); }, CLOUD_PULL_EVERY);
   document.addEventListener("visibilitychange", () => {
     // coming back: fetch what changed elsewhere; leaving: get ours out while we still can
