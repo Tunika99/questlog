@@ -5169,17 +5169,24 @@ function setupFocusControls() {
 /* ============================================================
    MUSIC - your own focus tracks (the brainfm folder) under the timer
    ============================================================ */
-// A web page cannot read a folder on its own: the files are picked once per device and
-// then kept in this browser's IndexedDB, so later sessions play without asking again.
-// Not on a shared computer - there they live in memory and leave with the tab.
+// Two sources. Logged in, the tracks come from a private folder in your Google Drive,
+// piece by piece through the Apps Script - so they play on every device, the shared
+// computer included. Or a folder picked on this device (a web page cannot read one on
+// its own). Either way, played tracks stay in this browser's IndexedDB - except on a
+// shared computer, where they live in memory and leave with the tab.
 
 const MUSIC_DB = "questlog-music";
 const MUSIC_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)$/i;
+const MUSIC_KEEP = 12;           // Drive tracks kept per device (~30 MB each), oldest go first
+const MUSIC_PARALLEL = 3;        // pieces of a Drive track fetched at once
+const MUSIC_LRU = "questlog_music_lru";
 
 const music = {
-  names: null,      // track names on this device (null = not looked up yet)
-  mem: new Map(),   // name -> File/Blob, when not cached or not yet cached
-  order: [], idx: 0, url: null, audio: null, picking: false, saving: false,
+  list: null,       // [{ key, name, id?, size?, parts? }] - null = not looked up yet
+  source: null,     // "local" | "drive"
+  mem: new Map(),   // key -> Blob, when not (yet) in IndexedDB
+  fetching: new Map(),   // key -> Promise<Blob>, so a track is never fetched twice at once
+  order: [], idx: 0, url: null, audio: null, loading: null, busy: false, error: "",
 };
 
 function musicIdb() {
@@ -5206,17 +5213,35 @@ function musicTx(mode, fn) {
 const musicCaches = () => appStore === localStorage;
 const musicTouch = () => matchMedia("(hover: none) and (pointer: coarse)").matches;
 
-async function musicLoadNames() {
-  if (music.names) return music.names;
-  let names = [];
-  if (musicCaches()) { try { names = (await musicTx("readonly", (st) => st.getAllKeys())) || []; } catch (e) {} }
-  music.names = [...new Set([...names, ...music.mem.keys()])];
-  return music.names;
+async function musicStoredKeys() {
+  if (!musicCaches()) return [];
+  try { return (await musicTx("readonly", (st) => st.getAllKeys())) || []; } catch (e) { return []; }
 }
 
-async function musicBlob(name) {
-  if (music.mem.has(name)) return music.mem.get(name);
-  try { return await musicTx("readonly", (st) => st.get(name)); } catch (e) { return null; }
+/* a folder picked on this device wins (it is instant); otherwise Drive, when logged in */
+async function musicLoadList() {
+  if (music.list) return music.list;
+  const local = [...new Set([...(await musicStoredKeys()), ...music.mem.keys()])]
+    .filter((k) => !k.startsWith("drive:"));
+  if (local.length) {
+    music.source = "local";
+    music.list = local.map((k) => ({ key: k, name: k }));
+    return music.list;
+  }
+  if (cloud.cfg) {
+    try {
+      const out = await cloudCall("music");
+      music.source = "drive";
+      music.error = "";
+      music.list = (out.tracks || []).map((t) => ({ key: "drive:" + t.id, name: t.name, id: t.id, size: t.size, parts: t.parts }));
+      return music.list;
+    } catch (e) {
+      music.error = e.message;   // not cached as a list - the next try asks again
+      music.failedAt = Date.now();
+      return [];
+    }
+  }
+  return [];
 }
 
 /* "EuropaRising_Focus_DeepWork_…mp3" -> "Europa Rising" */
@@ -5226,10 +5251,81 @@ function musicTitle(name) {
 }
 
 function musicShuffle() {
-  const a = [...(music.names || [])];
+  const a = [...(music.list || [])];
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
   music.order = a;
   music.idx = 0;
+}
+
+const musicAt = (offset = 0) => music.order.length ? music.order[(music.idx + offset) % music.order.length] : null;
+
+/* the track itself: memory, then this browser, then Drive */
+async function musicBlob(track) {
+  if (music.mem.has(track.key)) return music.mem.get(track.key);
+  if (musicCaches()) {
+    try {
+      const hit = await musicTx("readonly", (st) => st.get(track.key));
+      if (hit) { musicTouchLru(track.key); return hit; }
+    } catch (e) {}
+  }
+  if (!track.id) return null;
+  if (!music.fetching.has(track.key)) {
+    const p = musicDownload(track).finally(() => music.fetching.delete(track.key));
+    music.fetching.set(track.key, p);
+  }
+  return music.fetching.get(track.key);
+}
+
+async function musicDownload(track) {
+  const parts = new Array(track.parts);
+  let next = 0;
+  const worker = async () => {
+    while (next < track.parts) {
+      const i = next++;
+      const out = await cloudCall("track", { id: track.id, part: i });
+      parts[i] = Uint8Array.from(atob(out.data), (c) => c.charCodeAt(0));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(MUSIC_PARALLEL, track.parts) }, worker));
+  const ext = (track.name.match(MUSIC_EXT) || [, "mp3"])[1].toLowerCase();
+  const blob = new Blob(parts, { type: ext === "mp3" ? "audio/mpeg" : "audio/" + ext });
+  await musicKeep(track.key, blob);
+  return blob;
+}
+
+/* own device: into IndexedDB, the oldest Drive tracks make room. shared computer: memory,
+   only what is playing and what comes next */
+async function musicKeep(key, blob) {
+  if (musicCaches()) {
+    try {
+      await musicTx("readwrite", (st) => st.put(blob, key));
+      const lru = musicTouchLru(key);
+      const keep = new Set([musicAt(0)?.key, musicAt(1)?.key, key]);
+      const drop = lru.slice(0, Math.max(0, lru.length - MUSIC_KEEP)).filter((k) => !keep.has(k));
+      if (drop.length) {
+        await musicTx("readwrite", (st) => drop.forEach((k) => st.delete(k)));
+        musicSetLru(lru.filter((k) => !drop.includes(k)));
+      }
+      return;
+    } catch (e) { /* no room - fall through to memory */ }
+  }
+  const keep = new Set([musicAt(0)?.key, musicAt(1)?.key, key]);
+  for (const k of [...music.mem.keys()]) if (k.startsWith("drive:") && !keep.has(k)) music.mem.delete(k);
+  music.mem.set(key, blob);
+}
+
+function musicGetLru() {
+  try { return JSON.parse(appStore.getItem(MUSIC_LRU) || "[]"); } catch (e) { return []; }
+}
+function musicSetLru(lru) {
+  try { appStore.setItem(MUSIC_LRU, JSON.stringify(lru)); } catch (e) {}
+}
+function musicTouchLru(key) {
+  if (!key.startsWith("drive:")) return musicGetLru();
+  const lru = musicGetLru().filter((k) => k !== key);
+  lru.push(key);
+  musicSetLru(lru);
+  return lru;
 }
 
 /* the folder picker - a whole folder on a computer, a handful of files on a phone */
@@ -5242,12 +5338,10 @@ function musicPick() {
     if (!musicTouch()) input.webkitdirectory = true;
     input.style.display = "none";
     document.body.appendChild(input);
-    music.picking = true;
     let settled = false;
     const finish = (files) => {
       if (settled) return;
       settled = true;
-      music.picking = false;
       input.remove();
       resolve(files);
     };
@@ -5259,39 +5353,51 @@ function musicPick() {
 
 async function musicChooseFolder() {
   const files = await musicPick();
-  if (!files.length) { toast("No audio files picked - music stays off.", 3200); return false; }
+  if (!files.length) { toast("No audio files picked.", 3200); return false; }
   musicStopPlayback();
   music.mem = new Map(files.map((f) => [f.name, f]));
-  music.names = files.map((f) => f.name);
+  music.list = files.map((f) => ({ key: f.name, name: f.name }));
+  music.source = "local";
   musicShuffle();
   toast(`<span class="gold">${files.length} track${files.length === 1 ? "" : "s"}</span> ready.`, 2800);
-  musicCache(files);
+  musicCacheLocal(files);
   return true;
 }
 
-/* keep the picked tracks for later sessions - replaces whatever was cached before */
-async function musicCache(files) {
+/* keep a picked folder for later sessions - replaces any folder picked before */
+async function musicCacheLocal(files) {
   if (!musicCaches()) return;
-  music.saving = true;
   try {
-    await musicTx("readwrite", (st) => st.clear());
+    const old = (await musicStoredKeys()).filter((k) => !k.startsWith("drive:"));
+    await musicTx("readwrite", (st) => old.forEach((k) => st.delete(k)));
     for (const f of files) {
       await musicTx("readwrite", (st) => st.put(f, f.name));
       if (music.mem.get(f.name) === f) music.mem.delete(f.name);
     }
   } catch (e) {
     toast("Not enough room to keep the music in this browser - pick the folder again next time.", 5200);
-  } finally {
-    music.saving = false;
   }
+}
+
+/* back to Drive: the picked folder is dropped, cached Drive tracks stay */
+async function musicUseDrive() {
+  musicStopPlayback();
+  const local = (await musicStoredKeys()).filter((k) => !k.startsWith("drive:"));
+  try { await musicTx("readwrite", (st) => local.forEach((k) => st.delete(k))); } catch (e) {}
+  for (const k of [...music.mem.keys()]) if (!k.startsWith("drive:")) music.mem.delete(k);
+  music.list = null;
+  music.order = [];
+  syncMusic();
+  renderMusicRow();
 }
 
 async function musicForget() {
   musicStopPlayback();
   music.mem.clear();
-  music.names = [];
+  music.list = null;
   music.order = [];
   try { await musicTx("readwrite", (st) => st.clear()); } catch (e) {}
+  musicSetLru([]);
   setMusicOn(false);
   toast("Music forgotten on this device.", 2600);
 }
@@ -5304,9 +5410,22 @@ function musicWanted() {
 
 async function musicPlayCurrent() {
   if (!music.order.length) musicShuffle();
-  const name = music.order[music.idx % music.order.length];
-  const blob = name ? await musicBlob(name) : null;
-  if (!blob) { musicNext(); return; }
+  const track = musicAt(0);
+  if (!track) return;
+  music.loading = track;
+  renderMusicRow();
+  let blob = null;
+  try { blob = await musicBlob(track); }
+  catch (e) { music.error = e.message; music.failedAt = Date.now(); }
+  if (music.loading !== track) return;   // skipped or stopped meanwhile
+  music.loading = null;
+  if (!blob) {
+    renderMusicRow();
+    if (!music.error) musicNext();   // a vanished local file - move on; a failed download waits for the next tick
+    return;
+  }
+  music.error = "";
+  if (!ui.focus) { renderMusicRow(); return; }   // the timer stopped while the track came in
   if (!music.audio) {
     music.audio = new Audio();
     music.audio.addEventListener("ended", () => musicNext());
@@ -5314,19 +5433,24 @@ async function musicPlayCurrent() {
   if (music.url) URL.revokeObjectURL(music.url);
   music.url = URL.createObjectURL(blob);
   music.audio.src = music.url;
-  music.audio.dataset.track = name;
+  music.audio.dataset.track = track.key;
   renderMusicRow();
   if (musicWanted()) music.audio.play().catch(() => {});
+  // the next one comes in while this one plays - no silence between tracks
+  const upcoming = musicAt(1);
+  if (upcoming && upcoming !== track) musicBlob(upcoming).catch(() => {});
 }
 
 function musicNext() {
   if (!music.order.length) return;
   music.idx = (music.idx + 1) % music.order.length;
   if (music.idx === 0) musicShuffle();
+  if (music.audio) { music.audio.pause(); delete music.audio.dataset.track; }
   musicPlayCurrent();
 }
 
 function musicStopPlayback() {
+  music.loading = null;
   if (!music.audio) return;
   music.audio.pause();
   music.audio.removeAttribute("src");
@@ -5338,18 +5462,21 @@ function musicStopPlayback() {
 async function syncMusic() {
   if (!musicWanted()) {
     if (music.audio && !music.audio.paused) music.audio.pause();
-    if (!ui.focus) musicStopPlayback();
+    if (!ui.focus && (music.audio?.dataset.track || music.loading)) { musicStopPlayback(); renderMusicRow(); }
     return;
   }
-  if (music.busy) return;
+  if (music.busy || music.loading) return;
   if (music.audio?.dataset.track) {
     if (music.audio.paused) music.audio.play().catch(() => {});
     return;
   }
+  // after a failed download, try again only every 20 s
+  if (music.error && Date.now() - (music.failedAt || 0) < 20000) return;
   music.busy = true;
   try {
-    await musicLoadNames();
-    if (music.names.length) await musicPlayCurrent();
+    await musicLoadList();
+    if (music.list?.length) await musicPlayCurrent();
+    else renderMusicRow();
   } finally {
     music.busy = false;
   }
@@ -5359,30 +5486,40 @@ function setMusicOn(on) {
   db.settings = db.settings || {};
   db.settings.music = on;
   save(on ? "Music on" : "Music off");
+  music.error = "";
+  music.failedAt = 0;
   syncMusic();
   renderMusicRow();
 }
 
 async function toggleMusic() {
   if (db.settings?.music === true) { setMusicOn(false); return; }
-  await musicLoadNames();
-  if (!music.names.length && !(await musicChooseFolder())) { renderMusicRow(); return; }
+  await musicLoadList();
+  if (!music.list?.length) {
+    // nothing from Drive (not logged in, or the folder is unreachable): pick on this device
+    if (music.error) toast(`Music from Drive did not load - ${esc(music.error)}. Pick a folder instead.`, 5200);
+    if (!(await musicChooseFolder())) { renderMusicRow(); return; }
+  }
   setMusicOn(true);
 }
 
-/* the small row under the mode switch: toggle, the track that plays, skip, folder */
+/* the small row under the mode switch: toggle, the track that plays, skip, source */
 function renderMusicRow() {
   const host = $("#focus-music");
   if (!host) return;
   const on = db.settings?.music === true;
-  const track = music.audio?.dataset.track;
+  const playing = music.audio?.dataset.track;
+  const shown = music.loading || (playing && music.list?.find((t) => t.key === playing));
+  const label = music.loading ? `Loading ${musicTitle(music.loading.name)}…`
+    : shown ? musicTitle(shown.name)
+    : music.error ? "Music did not load - trying again" : "";
   host.classList.toggle("on", on);
   host.innerHTML = `
     <button class="fm-toggle" id="fm-toggle" title="Play your own focus tracks (M)">
       <span class="fm-icon" aria-hidden="true">♪</span>${on ? "Music on" : "Music"}</button>
-    ${on && track ? `<span class="fm-track" title="${esc(track)}">${esc(musicTitle(track))}</span>
-      <button class="fm-btn" id="fm-skip" title="Next track" aria-label="Next track">⏭</button>` : ""}
-    ${on ? `<button class="fm-btn" id="fm-folder" title="Pick another folder, or forget the music" aria-label="Music folder">⋯</button>` : ""}`;
+    ${on && label ? `<span class="fm-track ${music.loading ? "loading" : ""}" title="${esc(shown?.name || music.error)}">${esc(label)}</span>` : ""}
+    ${on && shown ? `<button class="fm-btn" id="fm-skip" title="Next track" aria-label="Next track">⏭</button>` : ""}
+    ${on ? `<button class="fm-btn" id="fm-folder" title="Where the music comes from" aria-label="Music source">⋯</button>` : ""}`;
   $("#fm-toggle", host).addEventListener("click", toggleMusic);
   $("#fm-skip", host)?.addEventListener("click", musicNext);
   $("#fm-folder", host)?.addEventListener("click", (e) => openMusicMenu(e.currentTarget));
@@ -5394,7 +5531,9 @@ function openMusicMenu(anchor) {
   menu.className = "qmenu";
   menu.id = "qmenu";
   menu.innerHTML =
-    `<button data-a="pick">♪ ${musicTouch() ? "Pick other tracks…" : "Pick another folder…"}</button>` +
+    `<div class="qm-head">${music.source === "drive" ? "Playing from Google Drive" : music.source === "local" ? "Playing from this device" : "Music"}</div>` +
+    (cloud.cfg && music.source !== "drive" ? `<button data-a="drive">☁ Play from Google Drive</button>` : "") +
+    `<button data-a="pick">♪ ${musicTouch() ? "Pick tracks on this device…" : "Pick a folder on this computer…"}</button>` +
     `<button data-a="forget">Forget the music here</button>`;
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
@@ -5402,7 +5541,8 @@ function openMusicMenu(anchor) {
   menu.style.top = clamp(r.top - menu.offsetHeight - 6, 8, innerHeight - menu.offsetHeight - 8) + "px";
   $$("button", menu).forEach((b) => b.addEventListener("click", async () => {
     closeQuestMenu();
-    if (b.dataset.a === "pick") { if (await musicChooseFolder()) { syncMusic(); renderMusicRow(); } }
+    if (b.dataset.a === "drive") musicUseDrive();
+    else if (b.dataset.a === "pick") { if (await musicChooseFolder()) { syncMusic(); renderMusicRow(); } }
     else musicForget();
   }));
   setTimeout(() => document.addEventListener("pointerdown", qmenuDismiss, { once: true }), 0);
