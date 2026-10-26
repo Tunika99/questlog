@@ -29,7 +29,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="styles.css?v=1791732039" />
+<link rel="stylesheet" href="styles.css?v=1793029858" />
 </head>
 <body>
 <div id="app">
@@ -42,9 +42,9 @@
     </div>
 
     <nav id="nav" aria-label="Main">
-      <button class="nav-item" data-view="today"><span class="nav-key">1</span>Today</button>
-      <button class="nav-item" data-view="quests"><span class="nav-key">2</span>Quests</button>
-      <button class="nav-item" data-view="timeline"><span class="nav-key">3</span>Day log</button>
+      <button class="nav-item" data-view="timeline"><span class="nav-key">1</span>Day log</button>
+      <button class="nav-item" data-view="today"><span class="nav-key">2</span>Today</button>
+      <button class="nav-item" data-view="quests"><span class="nav-key">3</span>Quests</button>
     </nav>
 
     <div class="side-section">
@@ -141,8 +141,10 @@
       <button data-mode="pomodoro">Pomodoro 25′</button>
     </div>
     <div class="pomo-presets hidden" id="pomo-presets"></div>
+    <div class="focus-music" id="focus-music"></div>
     <div class="focus-hints">
       <span><span class="kbd">space</span> pause</span>
+      <span><span class="kbd">M</span> music</span>
       <span><span class="kbd">C</span> complete</span>
       <span><span class="kbd">esc</span> leave</span>
     </div>
@@ -159,7 +161,7 @@
 
 <div id="toasts" role="status" aria-live="polite"></div>
 
-<script src="sync.js?v=1791732039"></script>
-<script src="app.js?v=1791732039"></script>
+<script src="sync.js?v=1793029858"></script>
+<script src="app.js?v=1793029858"></script>
 </body>
 </html>

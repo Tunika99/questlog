@@ -279,7 +279,7 @@ function rolloverOpenTasks() {
   const today = ymd(Date.now());
   let changed = false;
   // tasks without a date live in Someday and must never be dragged into today
-  for (const t of db.tasks) if (!t.done && t.date && t.date < today) { t.date = today; changed = true; }
+  for (const t of db.tasks) if (!t.done && !t.adhoc && t.date && t.date < today) { t.date = today; changed = true; }
   if (changed) save();
 }
 
@@ -569,8 +569,12 @@ function blocksFor(dateYmd) {
 }
 function todayBlocks() { return blocksFor(ymd(Date.now())); }
 
+/* instant-focus sessions keep their task (it carries the quest link and the hours)
+   but are sessions, not to-dos - they never show up in a list */
+const isListed = (t) => !t.adhoc;
+
 function tasksFor(dateYmd) {
-  return db.tasks.filter((t) => t.date === dateYmd).sort((a, b) => a.order - b.order);
+  return db.tasks.filter((t) => t.date === dateYmd && isListed(t)).sort((a, b) => a.order - b.order);
 }
 
 /* ============================================================
@@ -684,7 +688,7 @@ function checkProgressEvents() {
 /* ---------- ui state ---------- */
 
 const ui = {
-  view: "today",
+  view: "timeline",   // the Day log is where a visit starts
   selectedTaskId: null,
   recordScope: "week",
   focus: null, // { taskId, segStart, committed, mode, phase, phaseStart, phaseBase, cycles } - survives leaving the overlay
@@ -1105,11 +1109,11 @@ function shortDate(dateStr) {
 
 function upcomingTasks() {
   const today = ymd(Date.now());
-  return db.tasks.filter((t) => !t.done && t.date && t.date > today).sort((a, b) => (a.date < b.date ? -1 : 1));
+  return db.tasks.filter((t) => !t.done && t.date && t.date > today && isListed(t)).sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
 /* the backlog: written down, not yet given a day */
-const somedayTasks = () => db.tasks.filter((t) => !t.done && !t.date).sort((a, b) => a.order - b.order);
+const somedayTasks = () => db.tasks.filter((t) => !t.done && !t.date && isListed(t)).sort((a, b) => a.order - b.order);
 
 function openScheduleMenu(anchor, t) {
   closeQuestMenu();
@@ -1213,7 +1217,6 @@ function renderToday() {
     <div class="view-inner">
       <h2 class="view-title">Today</h2>
       <div class="view-sub">Ordered by intent, not by hour. Drag to reprioritise.</div>
-      <div class="card heat-card compact" id="heat-card"></div>
       <div id="week-goals"></div>
       <div id="quick-add" class="card">
         <span class="plus">＋</span>
@@ -1312,7 +1315,6 @@ function renderToday() {
     });
   }
 
-  renderHeatmap("#heat-card", { compact: true });
   renderWeekGoals();
   setupQuickAdd();
   setupReorder(openList);
@@ -2133,7 +2135,7 @@ function renderQuestDetail(questId) {
   const doneTasks = db.tasks
     .filter((t) => family.has(t.questId) && t.done)
     .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1));
-  const openCount = db.tasks.filter((t) => family.has(t.questId) && !t.done).length;
+  const openCount = db.tasks.filter((t) => family.has(t.questId) && !t.done && isListed(t)).length;
 
   view.innerHTML = `
     <div class="view-inner">
@@ -2464,7 +2466,7 @@ function renderQuests() {
     const total = questRollupSeconds(q.id);
     const ws = startOfWeek(Date.now());
     const thisWeek = questSecondsBetweenFor(q.id, ws, ws + 7 * DAY);
-    const openTasks = db.tasks.filter((t) => questFamily(q.id).includes(t.questId) && !t.done);
+    const openTasks = db.tasks.filter((t) => questFamily(q.id).includes(t.questId) && !t.done && isListed(t));
     const kids = subQuests(q.id);
     const lv = questLevel(total);
     const dl = deadlineInfo(q);
@@ -2722,7 +2724,7 @@ function weekStats(ws) {
   const we = ws + 7 * DAY;
   const questSec = questSecondsBetween(ws, we);
   const totalSec = sessionSecondsBetween(ws, we);
-  const tasksDone = db.tasks.filter((t) => t.done && t.date >= ymd(ws) && t.date < ymd(we)).length;
+  const tasksDone = db.tasks.filter((t) => t.done && isListed(t) && t.date >= ymd(ws) && t.date < ymd(we)).length;
 
   // habits: how many of the seven days each one was kept
   const habits = (db.habits || []).map((h) => {
@@ -3462,7 +3464,7 @@ function renderTimeline() {
   const offGrid = offGridSeconds(dayA);
   const dayQuestSec = questSecondsBetween(dayA, dayA + DAY);
   const carryOver = dayA > startOfDay(now)
-    ? db.tasks.filter((t) => !t.done && t.date === ymd(now))
+    ? db.tasks.filter((t) => !t.done && t.date === ymd(now) && isListed(t))
     : [];
 
   view.innerHTML = `
@@ -4832,6 +4834,7 @@ function openFocusOverlay() {
   $$("#focus-mode-switch button").forEach((b) => b.classList.toggle("on", b.dataset.mode === f.mode));
   syncFocusPhaseUI();
   renderPomoPresets();
+  renderMusicRow();
   renderFocusBlockList();
   ensureFocusTicker();
   tickFocus();
@@ -4918,6 +4921,7 @@ function stopFocusTicker() {
   clearInterval(ui.focusTicker);
   ui.focusTicker = null;
   syncPhoneTimer();   // nothing counts down any more - the phone must not ring
+  syncMusic();
 }
 
 /* stop from the background chip: log the segment, end the focus context */
@@ -4975,6 +4979,7 @@ function tickFocus() {
     }
   }
   syncPhoneTimer();
+  syncMusic();
 
   if (overlayOpen) {
     const timerEl = $("#focus-timer");
@@ -5072,6 +5077,7 @@ function pauseFocus(silent = false) {
     if (!silent) sfx.pause();
     $("#focus-pause").textContent = "Resume";
     $("#focus-timer").classList.add("paused");
+    syncMusic();
     renderHeader();
     if (!silent && logged > 3) {
       const t = taskById(f.taskId);
@@ -5085,6 +5091,7 @@ function pauseFocus(silent = false) {
     if (!silent) sfx.resume();
     $("#focus-pause").textContent = "Pause";
     $("#focus-timer").classList.remove("paused", "pomo-done");
+    syncMusic();
   }
 }
 
@@ -5157,6 +5164,248 @@ function setupFocusControls() {
       tickFocus();
     })
   );
+}
+
+/* ============================================================
+   MUSIC - your own focus tracks (the brainfm folder) under the timer
+   ============================================================ */
+// A web page cannot read a folder on its own: the files are picked once per device and
+// then kept in this browser's IndexedDB, so later sessions play without asking again.
+// Not on a shared computer - there they live in memory and leave with the tab.
+
+const MUSIC_DB = "questlog-music";
+const MUSIC_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)$/i;
+
+const music = {
+  names: null,      // track names on this device (null = not looked up yet)
+  mem: new Map(),   // name -> File/Blob, when not cached or not yet cached
+  order: [], idx: 0, url: null, audio: null, picking: false, saving: false,
+};
+
+function musicIdb() {
+  if (music.idb) return music.idb;
+  music.idb = new Promise((resolve, reject) => {
+    const req = indexedDB.open(MUSIC_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("tracks");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  music.idb.catch(() => { music.idb = null; });
+  return music.idb;
+}
+
+function musicTx(mode, fn) {
+  return musicIdb().then((d) => new Promise((resolve, reject) => {
+    const tx = d.transaction("tracks", mode);
+    const out = fn(tx.objectStore("tracks"));
+    tx.oncomplete = () => resolve(out && "result" in out ? out.result : undefined);
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  }));
+}
+
+const musicCaches = () => appStore === localStorage;
+const musicTouch = () => matchMedia("(hover: none) and (pointer: coarse)").matches;
+
+async function musicLoadNames() {
+  if (music.names) return music.names;
+  let names = [];
+  if (musicCaches()) { try { names = (await musicTx("readonly", (st) => st.getAllKeys())) || []; } catch (e) {} }
+  music.names = [...new Set([...names, ...music.mem.keys()])];
+  return music.names;
+}
+
+async function musicBlob(name) {
+  if (music.mem.has(name)) return music.mem.get(name);
+  try { return await musicTx("readonly", (st) => st.get(name)); } catch (e) { return null; }
+}
+
+/* "EuropaRising_Focus_DeepWork_…mp3" -> "Europa Rising" */
+function musicTitle(name) {
+  const base = name.replace(MUSIC_EXT, "").split("_")[0].replace(/([a-z])([A-Z])/g, "$1 $2").trim();
+  return base || name;
+}
+
+function musicShuffle() {
+  const a = [...(music.names || [])];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  music.order = a;
+  music.idx = 0;
+}
+
+/* the folder picker - a whole folder on a computer, a handful of files on a phone */
+function musicPick() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.accept = "audio/*";
+    if (!musicTouch()) input.webkitdirectory = true;
+    input.style.display = "none";
+    document.body.appendChild(input);
+    music.picking = true;
+    let settled = false;
+    const finish = (files) => {
+      if (settled) return;
+      settled = true;
+      music.picking = false;
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener("change", () => finish([...input.files].filter((f) => MUSIC_EXT.test(f.name))));
+    input.addEventListener("cancel", () => finish([]));
+    input.click();
+  });
+}
+
+async function musicChooseFolder() {
+  const files = await musicPick();
+  if (!files.length) { toast("No audio files picked - music stays off.", 3200); return false; }
+  musicStopPlayback();
+  music.mem = new Map(files.map((f) => [f.name, f]));
+  music.names = files.map((f) => f.name);
+  musicShuffle();
+  toast(`<span class="gold">${files.length} track${files.length === 1 ? "" : "s"}</span> ready.`, 2800);
+  musicCache(files);
+  return true;
+}
+
+/* keep the picked tracks for later sessions - replaces whatever was cached before */
+async function musicCache(files) {
+  if (!musicCaches()) return;
+  music.saving = true;
+  try {
+    await musicTx("readwrite", (st) => st.clear());
+    for (const f of files) {
+      await musicTx("readwrite", (st) => st.put(f, f.name));
+      if (music.mem.get(f.name) === f) music.mem.delete(f.name);
+    }
+  } catch (e) {
+    toast("Not enough room to keep the music in this browser - pick the folder again next time.", 5200);
+  } finally {
+    music.saving = false;
+  }
+}
+
+async function musicForget() {
+  musicStopPlayback();
+  music.mem.clear();
+  music.names = [];
+  music.order = [];
+  try { await musicTx("readwrite", (st) => st.clear()); } catch (e) {}
+  setMusicOn(false);
+  toast("Music forgotten on this device.", 2600);
+}
+
+/* what should be playing right now: music on, timer running, not on a break */
+function musicWanted() {
+  const f = ui.focus;
+  return db.settings?.music === true && !!f && !!f.segStart && !(f.mode === "pomodoro" && f.phase === "break");
+}
+
+async function musicPlayCurrent() {
+  if (!music.order.length) musicShuffle();
+  const name = music.order[music.idx % music.order.length];
+  const blob = name ? await musicBlob(name) : null;
+  if (!blob) { musicNext(); return; }
+  if (!music.audio) {
+    music.audio = new Audio();
+    music.audio.addEventListener("ended", () => musicNext());
+  }
+  if (music.url) URL.revokeObjectURL(music.url);
+  music.url = URL.createObjectURL(blob);
+  music.audio.src = music.url;
+  music.audio.dataset.track = name;
+  renderMusicRow();
+  if (musicWanted()) music.audio.play().catch(() => {});
+}
+
+function musicNext() {
+  if (!music.order.length) return;
+  music.idx = (music.idx + 1) % music.order.length;
+  if (music.idx === 0) musicShuffle();
+  musicPlayCurrent();
+}
+
+function musicStopPlayback() {
+  if (!music.audio) return;
+  music.audio.pause();
+  music.audio.removeAttribute("src");
+  delete music.audio.dataset.track;
+  if (music.url) { URL.revokeObjectURL(music.url); music.url = null; }
+}
+
+/* called on every focus tick and state change - cheap when nothing changes */
+async function syncMusic() {
+  if (!musicWanted()) {
+    if (music.audio && !music.audio.paused) music.audio.pause();
+    if (!ui.focus) musicStopPlayback();
+    return;
+  }
+  if (music.busy) return;
+  if (music.audio?.dataset.track) {
+    if (music.audio.paused) music.audio.play().catch(() => {});
+    return;
+  }
+  music.busy = true;
+  try {
+    await musicLoadNames();
+    if (music.names.length) await musicPlayCurrent();
+  } finally {
+    music.busy = false;
+  }
+}
+
+function setMusicOn(on) {
+  db.settings = db.settings || {};
+  db.settings.music = on;
+  save(on ? "Music on" : "Music off");
+  syncMusic();
+  renderMusicRow();
+}
+
+async function toggleMusic() {
+  if (db.settings?.music === true) { setMusicOn(false); return; }
+  await musicLoadNames();
+  if (!music.names.length && !(await musicChooseFolder())) { renderMusicRow(); return; }
+  setMusicOn(true);
+}
+
+/* the small row under the mode switch: toggle, the track that plays, skip, folder */
+function renderMusicRow() {
+  const host = $("#focus-music");
+  if (!host) return;
+  const on = db.settings?.music === true;
+  const track = music.audio?.dataset.track;
+  host.classList.toggle("on", on);
+  host.innerHTML = `
+    <button class="fm-toggle" id="fm-toggle" title="Play your own focus tracks (M)">
+      <span class="fm-icon" aria-hidden="true">♪</span>${on ? "Music on" : "Music"}</button>
+    ${on && track ? `<span class="fm-track" title="${esc(track)}">${esc(musicTitle(track))}</span>
+      <button class="fm-btn" id="fm-skip" title="Next track" aria-label="Next track">⏭</button>` : ""}
+    ${on ? `<button class="fm-btn" id="fm-folder" title="Pick another folder, or forget the music" aria-label="Music folder">⋯</button>` : ""}`;
+  $("#fm-toggle", host).addEventListener("click", toggleMusic);
+  $("#fm-skip", host)?.addEventListener("click", musicNext);
+  $("#fm-folder", host)?.addEventListener("click", (e) => openMusicMenu(e.currentTarget));
+}
+
+function openMusicMenu(anchor) {
+  closeQuestMenu();
+  const menu = document.createElement("div");
+  menu.className = "qmenu";
+  menu.id = "qmenu";
+  menu.innerHTML =
+    `<button data-a="pick">♪ ${musicTouch() ? "Pick other tracks…" : "Pick another folder…"}</button>` +
+    `<button data-a="forget">Forget the music here</button>`;
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  menu.style.left = clamp(r.left, 8, innerWidth - menu.offsetWidth - 8) + "px";
+  menu.style.top = clamp(r.top - menu.offsetHeight - 6, 8, innerHeight - menu.offsetHeight - 8) + "px";
+  $$("button", menu).forEach((b) => b.addEventListener("click", async () => {
+    closeQuestMenu();
+    if (b.dataset.a === "pick") { if (await musicChooseFolder()) { syncMusic(); renderMusicRow(); } }
+    else musicForget();
+  }));
+  setTimeout(() => document.addEventListener("pointerdown", qmenuDismiss, { once: true }), 0);
 }
 
 /* ============================================================
@@ -5339,11 +5588,11 @@ function openBackupMenu(anchor) {
 function paletteItems() {
   const items = [
     { icon: "◉", label: "Instant focus - start a timer now", hint: "⌥F", run: startInstantFocus },
-    { icon: "☀", label: "Go to Today", hint: "1", run: () => setView("today") },
-    { icon: "◆", label: "Go to Quests", hint: "2", run: () => setView("quests") },
+    { icon: "☀", label: "Go to Today", hint: "2", run: () => setView("today") },
+    { icon: "◆", label: "Go to Quests", hint: "3", run: () => setView("quests") },
     { icon: "✦", label: "Go to Priming", hint: "5", run: () => setView("priming") },
     { icon: "◷", label: "Weekly review", run: () => openReview(startOfWeek(Date.now()), true) },
-    { icon: "▤", label: "Go to Day log", hint: "3", run: () => setView("timeline") },
+    { icon: "▤", label: "Go to Day log", hint: "1", run: () => setView("timeline") },
     { icon: "＋", label: "New task", hint: "N", run: () => { setView("today"); setTimeout(() => $("#quick-add-input")?.focus(), 50); } },
     { icon: "◇", label: "New quest", run: () => { setView("quests"); setTimeout(() => $(".new-quest-card")?.click(), 50); } },
   ];
@@ -5541,6 +5790,7 @@ function setupKeyboard() {
 
     if (inFocus) {
       if (e.key === " ") { e.preventDefault(); pauseFocus(); }
+      else if (e.key.toLowerCase() === "m" && !typing && !e.metaKey && !e.ctrlKey) { e.preventDefault(); toggleMusic(); }
       else if (e.key.toLowerCase() === "c") completeFocus();
       else if (e.key === "Escape") exitFocus();
       return;
@@ -5549,9 +5799,9 @@ function setupKeyboard() {
     if (typing) return;
 
     switch (e.key) {
-      case "1": setView("today"); break;
-      case "2": setView("quests"); break;
-      case "3": setView("timeline"); break;
+      case "1": setView("timeline"); break;
+      case "2": setView("today"); break;
+      case "3": setView("quests"); break;
       case "4": setView("cookies"); break;
       case "5": setView("priming"); break;
       case "n": case "N": case "a": case "A":
