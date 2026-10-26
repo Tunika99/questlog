@@ -3603,6 +3603,7 @@ function renderTimeline() {
 const CAL_TTL = 5 * 60000;
 const calCache = {};
 const calFetching = {};
+let calCloudReady = false;   // the login is read in cloudBoot - before that, "not connected" would be a guess
 
 function renderCalColumn(dayA) {
   const hit = calCache[ymd(dayA)];
@@ -3615,6 +3616,7 @@ function renderCalColumn(dayA) {
 async function fetchCal(dayA) {
   const key = ymd(dayA);
   if (calFetching[key]) return;
+  if (!ON_MAC_SERVER && !cloud.cfg && !calCloudReady) return;   // asked again once cloudBoot is through
   calFetching[key] = true;
   try {
     let out;
@@ -5180,6 +5182,7 @@ const MUSIC_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|webm)$/i;
 const MUSIC_KEEP = 12;           // Drive tracks kept per device (~30 MB each), oldest go first
 const MUSIC_PARALLEL = 3;        // pieces of a Drive track fetched at once
 const MUSIC_LRU = "questlog_music_lru";
+const MUSIC_VOL = "questlog_music_volume";   // per device: the phone and the Mac want different levels
 
 const music = {
   list: null,       // [{ key, name, id?, size?, parts? }] - null = not looked up yet
@@ -5314,6 +5317,18 @@ async function musicKeep(key, blob) {
   music.mem.set(key, blob);
 }
 
+/* the music's own level, under the system volume - 0..1 */
+function musicVolume() {
+  let v = NaN;
+  try { v = parseFloat(appStore.getItem(MUSIC_VOL)); } catch (e) {}
+  return Number.isFinite(v) ? clamp(v, 0, 1) : 0.6;
+}
+function setMusicVolume(v) {
+  v = clamp(v, 0, 1);
+  try { appStore.setItem(MUSIC_VOL, String(v)); } catch (e) {}
+  if (music.audio) music.audio.volume = v;
+}
+
 function musicGetLru() {
   try { return JSON.parse(appStore.getItem(MUSIC_LRU) || "[]"); } catch (e) { return []; }
 }
@@ -5430,6 +5445,7 @@ async function musicPlayCurrent() {
     music.audio = new Audio();
     music.audio.addEventListener("ended", () => musicNext());
   }
+  music.audio.volume = musicVolume();
   if (music.url) URL.revokeObjectURL(music.url);
   music.url = URL.createObjectURL(blob);
   music.audio.src = music.url;
@@ -5519,9 +5535,19 @@ function renderMusicRow() {
       <span class="fm-icon" aria-hidden="true">♪</span>${on ? "Music on" : "Music"}</button>
     ${on && label ? `<span class="fm-track ${music.loading ? "loading" : ""}" title="${esc(shown?.name || music.error)}">${esc(label)}</span>` : ""}
     ${on && shown ? `<button class="fm-btn" id="fm-skip" title="Next track" aria-label="Next track">⏭</button>` : ""}
+    ${on ? `<input type="range" class="fm-vol" id="fm-vol" min="0" max="1" step="0.02"
+             value="${musicVolume()}" title="Music volume" aria-label="Music volume"/>` : ""}
     ${on ? `<button class="fm-btn" id="fm-folder" title="Where the music comes from" aria-label="Music source">⋯</button>` : ""}`;
   $("#fm-toggle", host).addEventListener("click", toggleMusic);
   $("#fm-skip", host)?.addEventListener("click", musicNext);
+  const vol = $("#fm-vol", host);
+  if (vol) {
+    const paint = () => vol.style.setProperty("--fill", Math.round(vol.value * 100) + "%");
+    paint();
+    vol.addEventListener("input", () => { setMusicVolume(+vol.value); paint(); });
+    // arrows belong to the slider here, not to the app
+    vol.addEventListener("keydown", (e) => { if (e.key !== " " && e.key !== "Escape") e.stopPropagation(); });
+  }
   $("#fm-folder", host)?.addEventListener("click", (e) => openMusicMenu(e.currentTarget));
 }
 
@@ -6047,6 +6073,8 @@ function boot() {
   renderAll();
   // priming and review decide from the freshest state - another device may have done them already
   cloudBoot().finally(() => {
+    calCloudReady = true;
+    if (ui.view === "timeline") renderCalColumn(startOfDay(tlDay()));
     syncPhoneTimer();   // a reload ends any running pomodoro - clear a reminder left behind
     maybeShowPriming();
     setTimeout(maybeShowReview, 1200);
